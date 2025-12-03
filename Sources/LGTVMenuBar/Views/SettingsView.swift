@@ -398,9 +398,23 @@ struct GeneralTab: View {
         let wasGranted = hasAccessibilityPermission
         hasAccessibilityPermission = AXIsProcessTrusted()
         
-        // If just granted, stop polling
+        // If just granted, stop polling and reinitialize media key capture
         if !wasGranted && hasAccessibilityPermission {
             stopPermissionPolling()
+            
+            // If media keys were already enabled (user toggled before permission was granted),
+            // or if user had previously enabled them, trigger a re-initialization
+            if controller.isMediaKeyControlEnabled {
+                Task {
+                    // Brief delay to let macOS fully activate the permission
+                    try? await Task.sleep(for: .milliseconds(500))
+                    // Toggle off and on to force re-initialization of event tap
+                    controller.isMediaKeyControlEnabled = false
+                    try? await Task.sleep(for: .milliseconds(100))
+                    controller.isMediaKeyControlEnabled = true
+                    mediaKeysEnabled = true
+                }
+            }
         }
     }
     

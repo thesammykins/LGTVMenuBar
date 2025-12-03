@@ -83,34 +83,49 @@ final class MediaKeyManager: MediaKeyManagerProtocol {
         // Store callback
         self.mediaKeyCallback = callback
         
-        // Create event tap
-        // NX_SYSDEFINED has raw value 14 - this is where media keys are delivered
-        let eventMask = CGEventMask(1 << 14)
+        // Create event tap with retry logic
+        // macOS sometimes needs a moment to fully activate permissions
+        var eventTap: CFMachPort?
+        let eventMask = CGEventMask(1 << 14)  // NX_SYSDEFINED
         
-        guard let eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: eventMask,
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else {
-                    return Unmanaged.passRetained(event)
-                }
-                
-                let manager = Unmanaged<MediaKeyManager>.fromOpaque(refcon).takeUnretainedValue()
-                return manager.handleEvent(proxy: proxy, type: type, event: event)
-            },
-            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        ) else {
-            throw LGTVError.mediaKeyError("Failed to create event tap for media key capture")
+        for attempt in 1...3 {
+            eventTap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: eventMask,
+                callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                    guard let refcon = refcon else {
+                        return Unmanaged.passRetained(event)
+                    }
+                    
+                    let manager = Unmanaged<MediaKeyManager>.fromOpaque(refcon).takeUnretainedValue()
+                    return manager.handleEvent(proxy: proxy, type: type, event: event)
+                },
+                userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+            )
+            
+            if eventTap != nil {
+                logger.info("Event tap created successfully on attempt \(attempt)")
+                break
+            }
+            
+            if attempt < 3 {
+                logger.warning("Event tap creation failed on attempt \(attempt), retrying...")
+                try? await Task.sleep(for: .milliseconds(500 * attempt))
+            }
         }
         
-        self.eventTap = eventTap
+        guard let tap = eventTap else {
+            throw LGTVError.mediaKeyError("Failed to create event tap for media key capture. Try toggling the accessibility permission off and on in System Settings.")
+        }
+        
+        self.eventTap = tap
         
         // Create run loop source
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
+        CGEvent.tapEnable(tap: tap, enable: true)
         
         self.runLoopSource = runLoopSource
         self._isCapturingMediaKeys = true
