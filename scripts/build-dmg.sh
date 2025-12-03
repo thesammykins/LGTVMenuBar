@@ -195,6 +195,15 @@ elif [[ -f "${PROJECT_DIR}/${APP_NAME}.entitlements" ]]; then
     cp "${PROJECT_DIR}/${APP_NAME}.entitlements" "${RELEASE_DIR}/"
 fi
 
+# Copy app icon
+log_info "Copying app icon..."
+if [[ -f "${PROJECT_DIR}/Sources/${APP_NAME}/Resources/AppIcon.icns" ]]; then
+    cp "${PROJECT_DIR}/Sources/${APP_NAME}/Resources/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/"
+    log_success "App icon copied"
+else
+    log_info "No app icon found at Sources/${APP_NAME}/Resources/AppIcon.icns"
+fi
+
 # Create PkgInfo
 echo -n "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
 

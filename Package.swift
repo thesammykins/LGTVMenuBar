@@ -14,7 +14,8 @@ let package = Package(
         .executableTarget(
             name: "LGTVMenuBar",
             path: "Sources/LGTVMenuBar",
-            exclude: ["Info.plist", "LGTVMenuBar.entitlements"]
+            exclude: ["Info.plist", "LGTVMenuBar.entitlements"],
+            resources: [.copy("Resources")]
         ),
         .testTarget(
             name: "LGTVMenuBarTests",
