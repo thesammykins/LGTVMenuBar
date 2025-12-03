@@ -43,13 +43,12 @@ jobs:
         run: |
           chmod +x ./scripts/build-dmg.sh
           ./scripts/build-dmg.sh
-        working-directory: LGTVMenuBar
       
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: LGTVMenuBar-${{ steps.version.outputs.version }}
-          path: LGTVMenuBar/release/*.dmg
+          path: release/*.dmg
           if-no-files-found: error
           retention-days: 30
       
@@ -62,4 +61,4 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: |
-            LGTVMenuBar/release/*.dmg
+            release/*.dmg
