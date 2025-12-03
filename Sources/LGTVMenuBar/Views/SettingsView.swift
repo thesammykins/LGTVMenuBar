@@ -163,6 +163,7 @@ struct TVConfigurationTab: View {
             ipAddress: ipAddress,
             macAddress: macAddress,
             preferredInput: preferredInput.rawValue,
+            autoConnectOnLaunch: controller.configuration?.autoConnectOnLaunch ?? true,
             wakeWithMac: controller.configuration?.wakeWithMac ?? true,
             sleepWithMac: controller.configuration?.sleepWithMac ?? true,
             switchInputOnWake: controller.configuration?.switchInputOnWake ?? false,
@@ -197,6 +198,7 @@ struct TVConfigurationTab: View {
 struct AutomationTab: View {
     @Bindable var controller: TVController
     
+    @State private var autoConnectOnLaunch: Bool = true
     @State private var wakeWithMac: Bool = true
     @State private var sleepWithMac: Bool = true
     @State private var switchInputOnWake: Bool = false
@@ -205,6 +207,9 @@ struct AutomationTab: View {
     var body: some View {
         Form {
             Section {
+                Toggle("Connect to TV on app launch", isOn: $autoConnectOnLaunch)
+                    .help("Automatically connect to your TV when the app starts")
+                
                 Toggle("Wake TV when Mac wakes", isOn: $wakeWithMac)
                     .help("Automatically send Wake-on-LAN when your Mac wakes from sleep")
                 
@@ -248,6 +253,7 @@ struct AutomationTab: View {
     
     private func loadAutomationSettings() {
         if let config = controller.configuration {
+            autoConnectOnLaunch = config.autoConnectOnLaunch
             wakeWithMac = config.wakeWithMac
             sleepWithMac = config.sleepWithMac
             switchInputOnWake = config.switchInputOnWake
@@ -264,6 +270,7 @@ struct AutomationTab: View {
             ipAddress: existing.ipAddress,
             macAddress: existing.macAddress,
             preferredInput: existing.preferredInput,
+            autoConnectOnLaunch: autoConnectOnLaunch,
             wakeWithMac: wakeWithMac,
             sleepWithMac: sleepWithMac,
             switchInputOnWake: switchInputOnWake,
@@ -282,6 +289,12 @@ struct GeneralTab: View {
     @State private var launchAtLogin: Bool = false
     @State private var mediaKeysEnabled: Bool = false
     @State private var hasAccessibilityPermission: Bool = false
+    @State private var permissionCheckTimer: Timer?
+    
+    /// App version from bundle, with fallback
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+    }
     
     var body: some View {
         Form {
@@ -352,7 +365,7 @@ struct GeneralTab: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("LGTV Menu Bar")
                         .font(.headline)
-                    Text("Version 1.0.0")
+                    Text("Version \(appVersion)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -367,15 +380,47 @@ struct GeneralTab: View {
             launchAtLogin = (try? await controller.isLaunchAtLoginEnabled()) ?? false
             mediaKeysEnabled = controller.isMediaKeyControlEnabled
             checkAccessibilityPermission()
+            startPermissionPollingIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // Re-check permission when app becomes active (user may have just granted it)
             checkAccessibilityPermission()
         }
+        .onAppear {
+            startPermissionPollingIfNeeded()
+        }
+        .onDisappear {
+            stopPermissionPolling()
+        }
     }
     
     private func checkAccessibilityPermission() {
+        let wasGranted = hasAccessibilityPermission
         hasAccessibilityPermission = AXIsProcessTrusted()
+        
+        // If just granted, stop polling
+        if !wasGranted && hasAccessibilityPermission {
+            stopPermissionPolling()
+        }
+    }
+    
+    private func startPermissionPollingIfNeeded() {
+        guard !hasAccessibilityPermission else { return }
+        stopPermissionPolling() // Clear any existing timer
+        
+        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+            Task { @MainActor in
+                checkAccessibilityPermission()
+                if hasAccessibilityPermission {
+                    stopPermissionPolling()
+                }
+            }
+        }
+    }
+    
+    private func stopPermissionPolling() {
+        permissionCheckTimer?.invalidate()
+        permissionCheckTimer = nil
     }
     
     private func openAccessibilitySettings() {

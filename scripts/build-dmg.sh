@@ -23,12 +23,20 @@ set -euo pipefail
 
 APP_NAME="LGTVMenuBar"
 BUNDLE_ID="com.thesammykins.lgtvmenubar"
-VERSION="${APP_VERSION:-1.0.0}"
 MIN_MACOS="15.0"
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Read version from Info.plist
+INFO_PLIST="${PROJECT_DIR}/Sources/${APP_NAME}/Info.plist"
+if [[ -f "${INFO_PLIST}" ]]; then
+    VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${INFO_PLIST}" 2>/dev/null || echo "1.0.0")
+else
+    VERSION="${APP_VERSION:-1.0.0}"
+fi
+
 BUILD_DIR="${PROJECT_DIR}/.build"
 RELEASE_DIR="${PROJECT_DIR}/release"
 APP_BUNDLE="${RELEASE_DIR}/${APP_NAME}.app"

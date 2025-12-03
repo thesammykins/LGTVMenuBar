@@ -162,8 +162,15 @@ private struct QuickActionsSection: View {
                 Button {
                     Task { try? await controller.powerOff() }
                 } label: {
-                    Label("Power Off", systemImage: "power")
-                        .frame(maxWidth: .infinity)
+                    Label {
+                        Text("Power Off")
+                    } icon: {
+                        Image(systemName: "power")
+                            .imageScale(.medium)
+                            .frame(width: 16, height: 16)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 2)
                 }
                 .buttonStyle(.bordered)
                 
@@ -171,8 +178,15 @@ private struct QuickActionsSection: View {
                 Button {
                     Task { try? await controller.screenOff() }
                 } label: {
-                    Label("Screen Off", systemImage: "moon.fill")
-                        .frame(maxWidth: .infinity)
+                    Label {
+                        Text("Screen Off")
+                    } icon: {
+                        Image(systemName: "moon.fill")
+                            .imageScale(.medium)
+                            .frame(width: 16, height: 16)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 2)
                 }
                 .buttonStyle(.bordered)
             }
@@ -278,7 +292,9 @@ private struct VolumeSection: View {
                 Task { try? await controller.volumeDown() }
             } label: {
                 Image(systemName: "speaker.minus.fill")
-                    .font(.title2)
+                    .imageScale(.large)
+                    .frame(width: 20, height: 20)
+                    .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
             
@@ -287,8 +303,10 @@ private struct VolumeSection: View {
                 Task { try? await controller.toggleMute() }
             } label: {
                 Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.title2)
+                    .imageScale(.large)
+                    .frame(width: 20, height: 20)
                     .foregroundStyle(controller.isMuted ? .red : .primary)
+                    .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
             
@@ -297,7 +315,9 @@ private struct VolumeSection: View {
                 Task { try? await controller.volumeUp() }
             } label: {
                 Image(systemName: "speaker.plus.fill")
-                    .font(.title2)
+                    .imageScale(.large)
+                    .frame(width: 20, height: 20)
+                    .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
         }

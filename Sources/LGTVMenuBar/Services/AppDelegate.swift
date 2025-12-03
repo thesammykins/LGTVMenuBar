@@ -37,6 +37,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Check if onboarding is needed
         checkOnboardingStatus()
         
+        // Auto-connect if enabled and configuration exists (not during onboarding)
+        if controller.configuration != nil {
+            let hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+            if hasCompletedOnboarding {
+                Task {
+                    // Small delay to let the app fully initialize
+                    try? await Task.sleep(for: .milliseconds(500))
+                    await controller.autoConnectOnStartup()
+                }
+            }
+        }
+        
         logger.info("Application launched successfully")
     }
     

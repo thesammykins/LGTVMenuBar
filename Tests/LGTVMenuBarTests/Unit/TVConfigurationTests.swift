@@ -16,6 +16,7 @@ struct TVConfigurationTests {
             ipAddress: "192.168.1.100",
             macAddress: "AA:BB:CC:DD:EE:FF",
             preferredInput: "HDMI_1",
+            autoConnectOnLaunch: true,
             wakeWithMac: true,
             sleepWithMac: true,
             switchInputOnWake: true,
@@ -27,6 +28,7 @@ struct TVConfigurationTests {
         #expect(config.ipAddress == "192.168.1.100")
         #expect(config.macAddress == "AA:BB:CC:DD:EE:FF")
         #expect(config.preferredInput == "HDMI_1")
+        #expect(config.autoConnectOnLaunch == true)
         #expect(config.wakeWithMac == true)
         #expect(config.sleepWithMac == true)
         #expect(config.switchInputOnWake == true)
@@ -53,6 +55,7 @@ struct TVConfigurationTests {
         )
         
         #expect(config.preferredInput == "HDMI_1")
+        #expect(config.autoConnectOnLaunch == true)
         #expect(config.wakeWithMac == true)
         #expect(config.sleepWithMac == true)
         #expect(config.switchInputOnWake == false)
@@ -70,6 +73,7 @@ struct TVConfigurationTests {
             ipAddress: "192.168.1.100",
             macAddress: "AA:BB:CC:DD:EE:FF",
             preferredInput: "HDMI_2",
+            autoConnectOnLaunch: false,
             wakeWithMac: false,
             sleepWithMac: true,
             switchInputOnWake: true,
@@ -96,6 +100,7 @@ struct TVConfigurationTests {
             "ipAddress": "192.168.1.200",
             "macAddress": "11:22:33:44:55:66",
             "preferredInput": "HDMI_3",
+            "autoConnectOnLaunch": false,
             "wakeWithMac": false,
             "sleepWithMac": false,
             "switchInputOnWake": true,
@@ -112,6 +117,7 @@ struct TVConfigurationTests {
         #expect(config.ipAddress == "192.168.1.200")
         #expect(config.macAddress == "11:22:33:44:55:66")
         #expect(config.preferredInput == "HDMI_3")
+        #expect(config.autoConnectOnLaunch == false)
         #expect(config.wakeWithMac == false)
         #expect(config.sleepWithMac == false)
         #expect(config.switchInputOnWake == true)
@@ -125,6 +131,7 @@ struct TVConfigurationTests {
             ipAddress: "10.0.0.1",
             macAddress: "FF:EE:DD:CC:BB:AA",
             preferredInput: "HDMI_4",
+            autoConnectOnLaunch: false,
             wakeWithMac: true,
             sleepWithMac: false,
             switchInputOnWake: true,
@@ -142,6 +149,7 @@ struct TVConfigurationTests {
         #expect(decoded.ipAddress == original.ipAddress)
         #expect(decoded.macAddress == original.macAddress)
         #expect(decoded.preferredInput == original.preferredInput)
+        #expect(decoded.autoConnectOnLaunch == original.autoConnectOnLaunch)
         #expect(decoded.wakeWithMac == original.wakeWithMac)
         #expect(decoded.sleepWithMac == original.sleepWithMac)
         #expect(decoded.switchInputOnWake == original.switchInputOnWake)

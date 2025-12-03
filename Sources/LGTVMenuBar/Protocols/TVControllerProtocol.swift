@@ -22,6 +22,7 @@ public protocol TVControllerProtocol: Sendable {
     
     func connect() async throws
     func disconnect()
+    func autoConnectOnStartup() async
     func wake() async throws
     
     // MARK: - Power Control

@@ -27,6 +27,9 @@ final class MockTVController: TVControllerProtocol, Sendable {
     /// History of connect calls
     private(set) var connectCalls: [Date] = []
     
+    /// History of autoConnectOnStartup calls
+    private(set) var autoConnectOnStartupCalls: [Date] = []
+    
     /// History of disconnect calls
     private(set) var disconnectCalls: [Date] = []
     
@@ -128,6 +131,24 @@ final class MockTVController: TVControllerProtocol, Sendable {
     func disconnect() {
         disconnectCalls.append(Date())
         connectionState = .disconnected
+    }
+    
+    func autoConnectOnStartup() async {
+        autoConnectOnStartupCalls.append(Date())
+        
+        if operationDelay > 0 {
+            try? await Task.sleep(for: .seconds(operationDelay))
+        }
+        
+        // Only auto-connect if config exists and autoConnectOnLaunch is true
+        guard let config = configuration, config.autoConnectOnLaunch else { return }
+        
+        // Simulate the retry logic (simplified for mock)
+        do {
+            try await connect()
+        } catch {
+            // Silent failure for mock
+        }
     }
     
     func wake() async throws {
@@ -283,6 +304,7 @@ final class MockTVController: TVControllerProtocol, Sendable {
         saveConfigurationCalls.removeAll()
         clearConfigurationCalls.removeAll()
         connectCalls.removeAll()
+        autoConnectOnStartupCalls.removeAll()
         disconnectCalls.removeAll()
         wakeCalls.removeAll()
         powerOffCalls.removeAll()
@@ -314,6 +336,7 @@ final class MockTVController: TVControllerProtocol, Sendable {
     var saveConfigurationCallCount: Int { saveConfigurationCalls.count }
     var clearConfigurationCallCount: Int { clearConfigurationCalls.count }
     var connectCallCount: Int { connectCalls.count }
+    var autoConnectOnStartupCallCount: Int { autoConnectOnStartupCalls.count }
     var disconnectCallCount: Int { disconnectCalls.count }
     var wakeCallCount: Int { wakeCalls.count }
     var powerOffCallCount: Int { powerOffCalls.count }
@@ -331,6 +354,7 @@ final class MockTVController: TVControllerProtocol, Sendable {
     var lastSaveConfigurationCall: Date? { saveConfigurationCalls.last?.timestamp }
     var lastClearConfigurationCall: Date? { clearConfigurationCalls.last }
     var lastConnectCall: Date? { connectCalls.last }
+    var lastAutoConnectOnStartupCall: Date? { autoConnectOnStartupCalls.last }
     var lastDisconnectCall: Date? { disconnectCalls.last }
     var lastWakeCall: Date? { wakeCalls.last }
     var lastPowerOffCall: Date? { powerOffCalls.last }

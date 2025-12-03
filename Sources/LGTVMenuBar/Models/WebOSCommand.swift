@@ -3,6 +3,7 @@ import Foundation
 /// WebOS commands that can be sent to the TV
 public enum WebOSCommand: Sendable {
     case getForegroundAppInfo
+    case getCurrentForegroundAppInfo  // One-time query without subscription
     case getInputList
     case powerOn
     case powerOff

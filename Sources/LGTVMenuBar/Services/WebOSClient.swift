@@ -475,6 +475,9 @@ final class WebOSClient: WebOSClientProtocol {
         try? await sendCommand(WebOSCommand.getForegroundAppInfo)
         try? await sendCommand(WebOSCommand.getInputList)
         
+        // Query current foreground app immediately (one-time, not subscription)
+        try? await sendCommand(WebOSCommand.getCurrentForegroundAppInfo)
+        
         // Subscribe to volume changes (will push updates when volume changes)
         try? await sendCommand(WebOSCommand.subscribeVolume)
     }
@@ -632,6 +635,8 @@ final class WebOSClient: WebOSClientProtocol {
         switch command {
         case .getForegroundAppInfo:
             message["type"] = "subscribe"
+            message["uri"] = "ssap://com.webos.applicationManager/getForegroundAppInfo"
+        case .getCurrentForegroundAppInfo:
             message["uri"] = "ssap://com.webos.applicationManager/getForegroundAppInfo"
         case .getInputList:
             message["uri"] = "ssap://tv/getInputList"

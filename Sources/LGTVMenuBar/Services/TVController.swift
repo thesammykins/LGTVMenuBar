@@ -134,6 +134,28 @@ public final class TVController: TVControllerProtocol {
         connectionState = .disconnected
     }
     
+    /// Attempt to connect on app startup with retry logic
+    public func autoConnectOnStartup() async {
+        guard let config = configuration, config.autoConnectOnLaunch else { return }
+        
+        logger.info("Auto-connecting to TV on startup")
+        
+        // Retry up to 3 times with increasing delays
+        for attempt in 1...3 {
+            do {
+                try await connect()
+                logger.info("Auto-connect successful on attempt \(attempt)")
+                return
+            } catch {
+                logger.warning("Auto-connect attempt \(attempt) failed: \(error.localizedDescription)")
+                if attempt < 3 {
+                    try? await Task.sleep(for: .seconds(Double(attempt) * 2))
+                }
+            }
+        }
+        logger.error("Auto-connect failed after 3 attempts")
+    }
+    
     /// Wake TV via Wake-on-LAN
     public func wake() async throws {
         guard let config = configuration else {
