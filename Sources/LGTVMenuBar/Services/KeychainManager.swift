@@ -4,14 +4,14 @@ import OSLog
 
 /// Production implementation of KeychainManagerProtocol using Security framework
 /// 
-/// This service provides secure storage for TV configuration data using the iOS/macOS keychain.
-/// It handles serialization, encryption, and proper error management for keychain operations.
+/// This service provides secure storage for TV client keys using the iOS/macOS keychain.
+/// TV configuration (non-sensitive) is stored in UserDefaults instead.
 /// 
 /// Keychain items are stored with the following attributes:
-/// - Service: "com.lgtvmenubar.configuration"
-/// - Account: "tv_configuration"
+/// - Service: "com.lgtvmenubar.clientkeys"
+/// - Account: TV IP address (unique identifier)
 /// - Accessibility: .whenUnlocked (user must be authenticated)
-/// - Data type: Generic password with JSON-encoded TVConfiguration
+/// - Data type: Generic password with client key string
 /// 
 /// Note: The Security framework operations are thread-safe, so this class is safe to use
 /// from multiple concurrent contexts without requiring actor isolation.
@@ -19,102 +19,13 @@ public final class KeychainManager: KeychainManagerProtocol, Sendable {
     
     // MARK: - Constants
     
-    /// Keychain service identifier for TV configuration
-    private static let configService = "com.lgtvmenubar.configuration"
-    
     /// Keychain service identifier for client keys
     private static let clientKeyService = "com.lgtvmenubar.clientkeys"
-    
-    /// Keychain account identifier for TV configuration
-    private static let account = "tv_configuration"
     
     // MARK: - Initialization
     
     /// Initialize a new KeychainManager instance
     public init() {}
-    
-    // MARK: - KeychainManagerProtocol Implementation
-    
-    /// Save TV configuration to keychain
-    /// 
-    /// This method serializes the TVConfiguration to JSON and stores it securely in the keychain.
-    /// If an item already exists, it will be updated with the new configuration.
-    /// 
-    /// - Parameter configuration: The TV configuration to save
-    /// - Throws: LGTVError.keychainError if save operation fails
-    public func saveConfiguration(_ configuration: TVConfiguration) throws {
-        do {
-            let jsonData = try JSONEncoder().encode(configuration)
-            guard let jsonString = String(data: jsonData, encoding: .utf8) else {
-                throw LGTVError.keychainError(KeychainError.dataConversionFailed)
-            }
-            
-            try save(jsonString, service: Self.configService, forKey: Self.account)
-        } catch let error as LGTVError {
-            throw error
-        } catch {
-            throw LGTVError.keychainError(error)
-        }
-    }
-    
-    /// Load TV configuration from keychain
-    /// 
-    /// This method retrieves the JSON-encoded configuration from the keychain,
-    /// decodes it, and returns a TVConfiguration instance.
-    /// 
-    /// - Returns: The stored TV configuration, or nil if not found
-    /// - Throws: LGTVError.keychainError if load operation fails
-    public func loadConfiguration() throws -> TVConfiguration? {
-        do {
-            guard let jsonString = try retrieve(service: Self.configService, forKey: Self.account) else {
-                return nil
-            }
-            
-            guard let jsonData = jsonString.data(using: .utf8) else {
-                throw LGTVError.keychainError(KeychainError.dataConversionFailed)
-            }
-            
-            let configuration = try JSONDecoder().decode(TVConfiguration.self, from: jsonData)
-            return configuration
-        } catch let error as LGTVError {
-            throw error
-        } catch {
-            throw LGTVError.keychainError(error)
-        }
-    }
-    
-    /// Delete TV configuration from keychain
-    /// 
-    /// This method removes the stored configuration from the keychain.
-    /// If no configuration exists, this operation is a no-op.
-    /// 
-    /// - Throws: LGTVError.keychainError if delete operation fails
-    public func deleteConfiguration() throws {
-        do {
-            try delete(service: Self.configService, forKey: Self.account)
-        } catch let error as LGTVError {
-            throw error
-        } catch {
-            throw LGTVError.keychainError(error)
-        }
-    }
-    
-    /// Check if TV configuration exists in keychain
-    /// 
-    /// This method checks for the existence of a configuration without retrieving the data.
-    /// 
-    /// - Returns: True if configuration exists, false otherwise
-    /// - Throws: LGTVError.keychainError if check operation fails
-    public func hasConfiguration() throws -> Bool {
-        do {
-            let result = try retrieve(service: Self.configService, forKey: Self.account)
-            return result != nil
-        } catch let error as LGTVError {
-            throw error
-        } catch {
-            throw LGTVError.keychainError(error)
-        }
-    }
     
     // MARK: - Client Key Storage
     

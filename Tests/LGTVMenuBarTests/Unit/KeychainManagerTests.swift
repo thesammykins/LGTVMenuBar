@@ -15,106 +15,11 @@ struct KeychainManagerTests {
         let manager = KeychainManager()
         do {
             // Try a basic operation
-            _ = try manager.hasConfiguration()
+            _ = try manager.loadClientKey(for: "test-accessibility-check")
             return true
         } catch {
             return false
         }
-    }
-    
-    // MARK: - Configuration Tests
-    
-    @Test("Save and load configuration preserves all properties")
-    func saveAndLoadConfiguration() throws {
-        let keychainManager = KeychainManager()
-        
-        // Skip if keychain not accessible
-        guard Self.isKeychainAccessible() else {
-            return // Skip test gracefully
-        }
-        
-        // Clean up any existing test data
-        try? keychainManager.deleteConfiguration()
-        
-        defer {
-            try? keychainManager.deleteConfiguration()
-        }
-        
-        let configuration = TVConfiguration(
-            name: "Test TV",
-            ipAddress: "192.168.1.100",
-            macAddress: "AA:BB:CC:DD:EE:FF"
-        )
-        
-        try keychainManager.saveConfiguration(configuration)
-        let loadedConfiguration = try keychainManager.loadConfiguration()
-        
-        #expect(loadedConfiguration != nil)
-        #expect(loadedConfiguration?.name == configuration.name)
-        #expect(loadedConfiguration?.ipAddress == configuration.ipAddress)
-        #expect(loadedConfiguration?.macAddress == configuration.macAddress)
-    }
-    
-    @Test("hasConfiguration returns false when no configuration exists")
-    func hasConfigurationReturnsFalseWhenEmpty() throws {
-        let keychainManager = KeychainManager()
-        
-        // Skip if keychain not accessible
-        guard Self.isKeychainAccessible() else {
-            return
-        }
-        
-        // Clean up any existing test data
-        try? keychainManager.deleteConfiguration()
-        
-        let hasConfig = try keychainManager.hasConfiguration()
-        
-        #expect(hasConfig == false)
-    }
-    
-    @Test("hasConfiguration returns true after saving configuration")
-    func hasConfigurationReturnsTrueAfterSave() throws {
-        let keychainManager = KeychainManager()
-        
-        // Skip if keychain not accessible
-        guard Self.isKeychainAccessible() else {
-            return
-        }
-        
-        // Clean up any existing test data
-        try? keychainManager.deleteConfiguration()
-        
-        defer {
-            try? keychainManager.deleteConfiguration()
-        }
-        
-        let configuration = TVConfiguration(
-            name: "Test TV",
-            ipAddress: "192.168.1.100",
-            macAddress: "AA:BB:CC:DD:EE:FF"
-        )
-        try keychainManager.saveConfiguration(configuration)
-        
-        let hasConfig = try keychainManager.hasConfiguration()
-        
-        #expect(hasConfig == true)
-    }
-    
-    @Test("loadConfiguration returns nil when no configuration exists")
-    func loadNonExistentConfigurationReturnsNil() throws {
-        let keychainManager = KeychainManager()
-        
-        // Skip if keychain not accessible
-        guard Self.isKeychainAccessible() else {
-            return
-        }
-        
-        // Clean up any existing test data
-        try? keychainManager.deleteConfiguration()
-        
-        let configuration = try keychainManager.loadConfiguration()
-        
-        #expect(configuration == nil)
     }
     
     // MARK: - Client Key Tests

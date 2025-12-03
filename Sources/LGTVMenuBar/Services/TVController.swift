@@ -54,6 +54,7 @@ public final class TVController: TVControllerProtocol {
     
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "TVController")
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"
+    private let configurationKey = "tv_configuration"
     
     // MARK: - Initialization
     
@@ -97,16 +98,17 @@ public final class TVController: TVControllerProtocol {
     
     // MARK: - Configuration
     
-    /// Save TV configuration
+    /// Save TV configuration to UserDefaults
     public func saveConfiguration(_ config: TVConfiguration) throws {
-        try keychainManager.saveConfiguration(config)
+        let data = try JSONEncoder().encode(config)
+        UserDefaults.standard.set(data, forKey: configurationKey)
         self.configuration = config
         logger.info("Configuration saved for \(config.name)")
     }
     
-    /// Clear TV configuration
+    /// Clear TV configuration from UserDefaults
     public func clearConfiguration() throws {
-        try keychainManager.deleteConfiguration()
+        UserDefaults.standard.removeObject(forKey: configurationKey)
         self.configuration = nil
         logger.info("Configuration cleared")
     }
@@ -311,13 +313,19 @@ public final class TVController: TVControllerProtocol {
     }
     
     private func loadConfiguration() {
+        guard let data = UserDefaults.standard.data(forKey: configurationKey) else {
+            configuration = nil
+            return
+        }
+        
         do {
-            configuration = try keychainManager.loadConfiguration()
+            configuration = try JSONDecoder().decode(TVConfiguration.self, from: data)
             if let config = configuration {
                 logger.info("Loaded configuration for \(config.name)")
             }
         } catch {
-            logger.error("Failed to load configuration: \(error.localizedDescription)")
+            logger.error("Failed to decode configuration: \(error.localizedDescription)")
+            configuration = nil
         }
     }
     
