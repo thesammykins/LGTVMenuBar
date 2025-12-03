@@ -1,0 +1,28 @@
+# Build artifacts
+.build/
+DerivedData/
+
+# Release outputs
+release/
+*.dmg
+
+# Local app bundle
+LGTVMenuBar.app/
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+
+# Secrets (if any)
+*.pem
+*.p12
