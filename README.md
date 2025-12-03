@@ -70,7 +70,7 @@ On first launch, the onboarding wizard will guide you through:
 - **Swift 6.0** with strict concurrency
 - **SwiftUI** for the menu bar popover UI
 - **WebSocket** communication with LG WebOS API
-- **Keychain** for secure credential storage
+- **Keychain** for secure pairing key storage
 
 ## Project Structure
 
@@ -89,4 +89,4 @@ Tests/LGTVMenuBarTests/
 
 ## License
 
-Private - All rights reserved
+MIT License - see [LICENSE](LICENSE) for details.
