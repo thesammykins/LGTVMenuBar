@@ -12,7 +12,7 @@
 #
 # Output:
 #   - release/LGTVMenuBar.app
-#   - release/LGTVMenuBar-{VERSION}.dmg
+#   - release/LGTVMenuBar-{VERSION}-universal.dmg
 #
 
 set -euo pipefail
@@ -23,7 +23,7 @@ set -euo pipefail
 
 APP_NAME="LGTVMenuBar"
 BUNDLE_ID="com.thesammykins.lgtvmenubar"
-VERSION="1.0.0"
+VERSION="${APP_VERSION:-1.0.0}"
 MIN_MACOS="15.0"
 
 # Paths
@@ -33,7 +33,7 @@ BUILD_DIR="${PROJECT_DIR}/.build"
 RELEASE_DIR="${PROJECT_DIR}/release"
 APP_BUNDLE="${RELEASE_DIR}/${APP_NAME}.app"
 DMG_STAGING="${RELEASE_DIR}/dmg_staging"
-DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+DMG_NAME="${APP_NAME}-${VERSION}-universal.dmg"
 DMG_PATH="${RELEASE_DIR}/${DMG_NAME}"
 
 # =============================================================================

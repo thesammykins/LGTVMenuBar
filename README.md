@@ -40,6 +40,22 @@ swift test
 4. Follow the onboarding wizard to connect your TV
 5. Grant Accessibility permission when prompted (for media key capture)
 
+## First Launch (Security Warning)
+
+Since this app is distributed outside the Mac App Store and uses ad-hoc code signing, macOS Gatekeeper will block it on first launch with a message: **"LGTVMenuBar cannot be opened because the developer cannot be verified."**
+
+To open the app:
+
+1. **Right-click** (or Control-click) on LGTVMenuBar in Applications
+2. Select **Open** from the context menu
+3. Click **Open** in the dialog that appears
+
+You only need to do this once—subsequent launches work normally.
+
+### Why does this happen?
+
+This app is signed but not notarized with Apple (which requires a paid Developer account). The source code is fully available in this repository, and you can [build it yourself](#building) if you prefer.
+
 ## Configuration
 
 On first launch, the onboarding wizard will guide you through:
