@@ -21,6 +21,11 @@ struct InlineSettingsView: View {
                 .tabItem {
                     Label("General", systemImage: "gear")
                 }
+            
+            DiagnosticsTab(controller: controller)
+                .tabItem {
+                    Label("Diagnostics", systemImage: "bandage")
+                }
         }
         .frame(maxHeight: 500)
     }
@@ -441,6 +446,191 @@ struct GeneralTab: View {
         // Open System Settings to Accessibility pane
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+// MARK: - Diagnostics Tab
+
+struct DiagnosticsTab: View {
+    let controller: TVController
+    
+    @State private var isLoggingEnabled: Bool = false
+    @State private var isDebugMode: Bool = false
+    @State private var entryCount: Int = 0
+    @State private var recentEntryCount: Int = 0
+    @State private var showingExportSuccess = false
+    @State private var showingClipboardSuccess = false
+    @State private var showingError = false
+    @State private var errorMessage: String = ""
+    
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Enable Diagnostic Logging", isOn: $isLoggingEnabled)
+                        .onChange(of: isLoggingEnabled) { _, newValue in
+                            if newValue {
+                                controller.diagnosticLogger.enable()
+                            } else {
+                                controller.diagnosticLogger.disable()
+                            }
+                            updateCounts()
+                        }
+                    
+                    Text("⚠️ Logging state resets on app restart")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                
+                if isLoggingEnabled {
+                    Toggle("Enable Debug Mode", isOn: $isDebugMode)
+                        .help("Captures all log levels (debug, info, warning, error)")
+                        .onChange(of: isDebugMode) { _, newValue in
+                            controller.diagnosticLogger.setDebugMode(newValue)
+                        }
+                }
+            } header: {
+                Text("Capture Settings")
+            }
+            
+            Section {
+                HStack {
+                    Text("Events Captured:")
+                    Spacer()
+                    Text("\(entryCount)")
+                        .foregroundStyle(.secondary)
+                }
+                
+                HStack {
+                    Text("Last 24 Hours:")
+                    Spacer()
+                    Text("\(recentEntryCount)")
+                        .foregroundStyle(.secondary)
+                }
+                
+                HStack {
+                    Text("Capturing:")
+                    Spacer()
+                    Text(isDebugMode ? "All Levels" : "Warnings & Errors")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Status")
+            }
+            
+            Section {
+                Button("Export Logs to Desktop") {
+                    exportToDesktop()
+                }
+                .disabled(entryCount == 0)
+                
+                Button("Copy to Clipboard") {
+                    copyToClipboard()
+                }
+                .disabled(entryCount == 0)
+                
+                Button("Clear Logs", role: .destructive) {
+                    controller.diagnosticLogger.clear()
+                    updateCounts()
+                }
+                .disabled(entryCount == 0)
+            } header: {
+                Text("Actions")
+            }
+            
+            Section {
+                Label {
+                    Text("Logs may contain IP addresses and configuration details")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Privacy Notice")
+            }
+        }
+        .formStyle(.columns)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .onAppear {
+            loadDiagnosticState()
+        }
+        .alert("Export Successful", isPresented: $showingExportSuccess) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Diagnostic logs saved to Desktop")
+        }
+        .alert("Copied to Clipboard", isPresented: $showingClipboardSuccess) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Diagnostic logs copied as JSON")
+        }
+        .alert("Error", isPresented: $showingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage)
+        }
+    }
+    
+    private func loadDiagnosticState() {
+        isLoggingEnabled = controller.diagnosticLogger.isEnabled
+        isDebugMode = controller.diagnosticLogger.isDebugMode
+        updateCounts()
+    }
+    
+    private func updateCounts() {
+        entryCount = controller.diagnosticLogger.entryCount
+        recentEntryCount = controller.diagnosticLogger.recentEntryCount
+    }
+    
+    private func exportToDesktop() {
+        do {
+            // Create filename with timestamp: lgtv-diagnostics-YYYY-MM-DD-HHmmss.json
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            let timestamp = formatter.string(from: Date())
+            let filename = "lgtv-diagnostics-\(timestamp).json"
+            
+            // Get Desktop URL
+            guard let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else {
+                errorMessage = "Could not locate Desktop directory"
+                showingError = true
+                return
+            }
+            
+            let fileURL = desktopURL.appendingPathComponent(filename)
+            
+            // Export and write
+            let jsonData = try controller.diagnosticLogger.exportJSON()
+            try jsonData.write(to: fileURL, options: Data.WritingOptions.atomic)
+            
+            showingExportSuccess = true
+        } catch {
+            errorMessage = "Failed to export logs: \(error.localizedDescription)"
+            showingError = true
+        }
+    }
+    
+    private func copyToClipboard() {
+        do {
+            let jsonData = try controller.diagnosticLogger.exportJSON()
+            guard let jsonString = String(data: jsonData, encoding: .utf8) else {
+                errorMessage = "Failed to convert logs to text"
+                showingError = true
+                return
+            }
+            
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(jsonString, forType: .string)
+            
+            showingClipboardSuccess = true
+        } catch {
+            errorMessage = "Failed to copy logs: \(error.localizedDescription)"
+            showingError = true
         }
     }
 }

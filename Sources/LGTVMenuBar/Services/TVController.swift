@@ -53,7 +53,8 @@ public final class TVController: TVControllerProtocol {
     private let keychainManager: KeychainManagerProtocol
     private let mediaKeyManager: MediaKeyManagerProtocol
     private let launchAtLoginManager: LaunchAtLoginManagerProtocol
-    private let diagnosticLogger: DiagnosticLoggerProtocol
+    /// Diagnostic logger for troubleshooting and log export
+    public let diagnosticLogger: DiagnosticLoggerProtocol
     
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "TVController")
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"

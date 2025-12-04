@@ -13,6 +13,9 @@ public protocol TVControllerProtocol: Sendable {
     var currentInput: TVInputType? { get }
     var isMediaKeyControlEnabled: Bool { get set }
     
+    /// Diagnostic logger for troubleshooting and log export
+    var diagnosticLogger: DiagnosticLoggerProtocol { get }
+    
     // MARK: - Configuration
     
     func saveConfiguration(_ config: TVConfiguration) throws

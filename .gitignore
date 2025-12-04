@@ -26,3 +26,10 @@ xcuserdata/
 # Secrets (if any)
 *.pem
 *.p12
+
+# Agent-generated documentation (keep local only)
+docs/macos-accessibility-permissions-unsigned-apps-2025-12-03.md
+docs/swiftui-menubarextra-popover-dismiss-fix-2024-12.md
+docs/task-6-implementation-summary.md
+docs/task-6-testing-guide.md
+swift-testing-best-practices-2025-12.md
