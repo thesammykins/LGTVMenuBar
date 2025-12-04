@@ -60,6 +60,16 @@ public final class TVController: TVControllerProtocol {
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"
     private let configurationKey = "tv_configuration"
     
+    // MARK: - Debouncing
+    /// Timestamp of last wake execution (for debouncing rapid wake events)
+    private var lastWakeExecution: Date = .distantPast
+    
+    /// Timestamp of last sleep execution (for debouncing rapid sleep events)
+    private var lastSleepExecution: Date = .distantPast
+    
+    /// Debounce interval in seconds (matches Hammerspoon's proven value)
+    private let debounceInterval: TimeInterval = 10.0
+    
     // MARK: - Initialization
     
     public init(
@@ -319,6 +329,14 @@ public final class TVController: TVControllerProtocol {
             }
         }
         
+        // Screen wake events (display wakes without full system sleep)
+        powerManagerMutable.onScreenWake = { [weak self] in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                await self?.handleMacWake()
+            }
+        }
+        
         // Start monitoring
         powerManager.startMonitoring()
     }
@@ -343,6 +361,16 @@ public final class TVController: TVControllerProtocol {
     private func handleMacWake() async {
         guard let config = configuration, config.wakeWithMac else { return }
         
+        // Debounce: prevent duplicate wake attempts within 10 seconds
+        let now = Date()
+        let timeSinceLastWake = now.timeIntervalSince(lastWakeExecution)
+        if timeSinceLastWake < debounceInterval {
+            logger.info("Skipping wake - debounced (last execution \(String(format: "%.1f", timeSinceLastWake))s ago)")
+            logDiagnostic(level: "info", category: "TVController", message: "Wake attempt debounced", metadata: ["timeSinceLastWake": "\(String(format: "%.1f", timeSinceLastWake))s"])
+            return
+        }
+        lastWakeExecution = now
+        
         logger.info("Mac woke - waking TV")
         logDiagnostic(level: "info", category: "TVController", message: "Mac woke - waking TV")
         do {
@@ -350,6 +378,11 @@ public final class TVController: TVControllerProtocol {
             // Wait a bit for TV to boot, then connect
             try await Task.sleep(for: .seconds(3))
             try await connect()
+            
+            // Explicitly turn screen on
+            logger.info("Turning TV screen on")
+            logDiagnostic(level: "info", category: "TVController", message: "Turning TV screen on")
+            try await screenOn()
             
             if config.switchInputOnWake {
                 if let input = TVInputType(rawValue: config.preferredInput) {
@@ -375,6 +408,16 @@ public final class TVController: TVControllerProtocol {
     
     private func handleMacSleep() async {
         guard let config = configuration, config.sleepWithMac else { return }
+        
+        // Debounce: prevent duplicate sleep attempts within 10 seconds
+        let now = Date()
+        let timeSinceLastSleep = now.timeIntervalSince(lastSleepExecution)
+        if timeSinceLastSleep < debounceInterval {
+            logger.info("Skipping sleep - debounced (last execution \(String(format: "%.1f", timeSinceLastSleep))s ago)")
+            logDiagnostic(level: "info", category: "TVController", message: "Sleep attempt debounced", metadata: ["timeSinceLastSleep": "\(String(format: "%.1f", timeSinceLastSleep))s"])
+            return
+        }
+        lastSleepExecution = now
         
         // Don't sleep TV if user is on a different input (e.g., watching console, streaming device)
         if let currentInput = currentInput {

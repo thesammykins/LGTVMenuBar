@@ -92,6 +92,19 @@ final class MockTVController: TVControllerProtocol, Sendable {
     /// Mock return value for isLaunchAtLoginEnabled
     var mockLaunchAtLoginEnabled: Bool = false
     
+    /// Diagnostic logger for troubleshooting
+    private let _diagnosticLogger: DiagnosticLoggerProtocol
+    
+    var diagnosticLogger: DiagnosticLoggerProtocol {
+        _diagnosticLogger
+    }
+    
+    // MARK: - Initialization
+    
+    init(diagnosticLogger: DiagnosticLoggerProtocol) {
+        self._diagnosticLogger = diagnosticLogger
+    }
+    
     // MARK: - TVControllerProtocol Implementation
     
     func saveConfiguration(_ config: TVConfiguration) throws {

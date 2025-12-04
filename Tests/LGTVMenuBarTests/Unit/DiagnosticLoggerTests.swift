@@ -304,7 +304,8 @@ struct DiagnosticLoggerTests {
         
         // Verify top-level fields
         #expect(json["export_time"] != nil)
-        #expect(json["app_version"] as? String == "1.0.4")
+        let expectedVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        #expect(json["app_version"] as? String == expectedVersion)
         #expect(json["system_version"] != nil)
         #expect(json["entry_count"] as? Int == 1)
         
@@ -336,7 +337,8 @@ struct DiagnosticLoggerTests {
         // Verify header
         #expect(plainText.contains("LGTVMenuBar Diagnostic Log"))
         #expect(plainText.contains("Export Time:"))
-        #expect(plainText.contains("App Version: 1.0.4"))
+        let expectedVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        #expect(plainText.contains("App Version: \(expectedVersion)"))
         #expect(plainText.contains("Entry Count: 2"))
         
         // Verify entries (levels are padded to 7 characters)

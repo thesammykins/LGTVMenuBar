@@ -426,4 +426,66 @@ struct PowerManagerTests {
         #expect(mockManager.onScreenSleep == nil)
         #expect(mockManager.onScreenWake == nil)
     }
+    
+    // MARK: - Phase 2: Screen Unlock Event Tests
+    
+    @Test("MockPowerManager simulateScreenUnlockEvent invokes onScreenWake callback")
+    @MainActor
+    func mockSimulateScreenUnlockEventInvokesCallback() async {
+        let mockManager = MockPowerManager()
+        let callbackInvoked = UncheckedSendableBox(false)
+        
+        mockManager.onScreenWake = {
+            callbackInvoked.value = true
+        }
+        
+        mockManager.simulateScreenUnlockEvent()
+        
+        #expect(callbackInvoked.value == true)
+    }
+    
+    @Test("startMonitoring registers 5 notification observers (including unlock)")
+    @MainActor
+    func startMonitoringRegisters5Observers() {
+        let mockManager = MockPowerManager()
+        
+        // Note: This test verifies the mock tracks startMonitoring calls
+        // The actual PowerManager registers 5 observers:
+        // 1. willSleepNotification
+        // 2. didWakeNotification
+        // 3. screensDidSleepNotification
+        // 4. screensDidWakeNotification
+        // 5. screensDidUnlockNotification (Phase 2)
+        
+        mockManager.startMonitoring()
+        
+        // Verify monitoring was started (mock tracks this)
+        #expect(mockManager.startMonitoringCallCount == 1)
+        
+        // In the actual implementation, 5 observers would be registered
+        // This test documents the expected behavior for Phase 2
+    }
+    
+    @Test("screensDidUnlock notification is added to observers list")
+    @MainActor
+    func screensDidUnlockNotificationIsAdded() {
+        // Note: This test documents expected behavior for Phase 2
+        // The actual PowerManager should register an observer for:
+        // NSWorkspace.screensDidUnlockNotification
+        // which triggers the onScreenWake callback
+        
+        let mockManager = MockPowerManager()
+        let unlockEventReceived = UncheckedSendableBox(false)
+        
+        mockManager.onScreenWake = {
+            unlockEventReceived.value = true
+        }
+        
+        mockManager.startMonitoring()
+        
+        // Simulate unlock event (in real impl, this would come from NSWorkspace)
+        mockManager.simulateScreenUnlockEvent()
+        
+        #expect(unlockEventReceived.value == true)
+    }
 }

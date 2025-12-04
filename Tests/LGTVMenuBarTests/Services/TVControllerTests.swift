@@ -11,7 +11,7 @@ struct TVControllerTests {
     
     @Test("Save configuration updates state")
     func saveConfigurationUpdatesState() throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         let config = TVConfiguration(
             name: "Test TV",
             ipAddress: "192.168.1.100",
@@ -26,7 +26,7 @@ struct TVControllerTests {
     
     @Test("Clear configuration removes state")
     func clearConfigurationRemovesState() throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         let config = TVConfiguration(
             name: "Test TV",
             ipAddress: "192.168.1.100",
@@ -44,7 +44,7 @@ struct TVControllerTests {
     
     @Test("Connect updates connection state")
     func connectUpdatesConnectionState() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         let config = TVConfiguration(
             name: "Test TV",
             ipAddress: "192.168.1.100",
@@ -60,7 +60,7 @@ struct TVControllerTests {
     
     @Test("Disconnect updates connection state")
     func disconnectUpdatesConnectionState() {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         controller.connectionState = .connected
         
         controller.disconnect()
@@ -73,7 +73,7 @@ struct TVControllerTests {
     
     @Test("Volume up increases volume")
     func volumeUpIncreasesVolume() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         controller.volume = 50
         
         try await controller.volumeUp()
@@ -84,7 +84,7 @@ struct TVControllerTests {
     
     @Test("Volume down decreases volume")
     func volumeDownDecreasesVolume() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         controller.volume = 50
         
         try await controller.volumeDown()
@@ -95,7 +95,7 @@ struct TVControllerTests {
     
     @Test("Set volume clamps to valid range")
     func setVolumeClamps() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         
         try await controller.setVolume(150)
         #expect(controller.volume == 100)
@@ -106,7 +106,7 @@ struct TVControllerTests {
     
     @Test("Toggle mute changes state")
     func toggleMuteChangesState() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         controller.isMuted = false
         
         try await controller.toggleMute()
@@ -119,7 +119,7 @@ struct TVControllerTests {
     
     @Test("Switch input updates current input")
     func switchInputUpdatesCurrentInput() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         
         try await controller.switchInput(.hdmi2)
         
@@ -131,7 +131,7 @@ struct TVControllerTests {
     
     @Test("Operations throw configured errors")
     func operationsThrowConfiguredErrors() async {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         controller.shouldThrowError = true
         controller.errorToThrow = LGTVError.tvNotFound
         
@@ -144,7 +144,7 @@ struct TVControllerTests {
     
     @Test("Launch at login queries return mock value")
     func launchAtLoginReturnsValue() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         controller.mockLaunchAtLoginEnabled = true
         
         let enabled = try await controller.isLaunchAtLoginEnabled()
@@ -155,7 +155,7 @@ struct TVControllerTests {
     
     @Test("Set launch at login updates mock value")
     func setLaunchAtLoginUpdatesValue() async throws {
-        let controller = MockTVController()
+        let controller = MockTVController(diagnosticLogger: MockDiagnosticLogger())
         
         try await controller.setLaunchAtLogin(true)
         

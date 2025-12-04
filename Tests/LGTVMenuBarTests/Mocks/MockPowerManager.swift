@@ -199,6 +199,11 @@ final class MockPowerManager: PowerManagerProtocol, Sendable {
     func simulateScreenWakeEvent() {
         onScreenWake?()
     }
+    
+    /// Simulate a screen unlock event by calling the onScreenWake callback
+    func simulateScreenUnlockEvent() {
+        onScreenWake?()
+    }
 }
 
 /// Mock PowerManager errors for testing

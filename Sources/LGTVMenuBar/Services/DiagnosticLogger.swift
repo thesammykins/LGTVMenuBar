@@ -75,7 +75,7 @@ final class DiagnosticLogger: DiagnosticLoggerProtocol {
         // Build export structure
         let exportData: [String: Any] = [
             "export_time": ISO8601DateFormatter().string(from: Date()),
-            "app_version": "1.0.4",
+            "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
             "system_version": ProcessInfo.processInfo.operatingSystemVersionString,
             "entry_count": recentEntries.count,
             "entries": recentEntries.map { entry -> [String: Any] in
@@ -102,7 +102,7 @@ final class DiagnosticLogger: DiagnosticLoggerProtocol {
         var output = """
         LGTVMenuBar Diagnostic Log
         Export Time: \(formatDate(Date()))
-        App Version: 1.0.4
+        App Version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown")
         System Version: \(ProcessInfo.processInfo.operatingSystemVersionString)
         Entry Count: \(recentEntries.count)
         

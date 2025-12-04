@@ -150,6 +150,9 @@ final class PowerManager: PowerManagerProtocol {
     /// - didWakeNotification (Mac woke up)
     /// - screensDidSleepNotification (Display sleeping)
     /// - screensDidWakeNotification (Display woke)
+    /// And DistributedNotificationCenter for:
+    /// - com.apple.screenIsUnlocked (Screen unlocked)
+    /// - com.apple.screenIsUnlocked (Screen unlocked via DistributedNotificationCenter)
     func startMonitoring() {
         logger.info("Starting sleep/wake event monitoring")
         
@@ -207,6 +210,20 @@ final class PowerManager: PowerManagerProtocol {
         }
         workspaceNotificationObservers.append(screenWakeObserver)
         
+        // Monitor screen unlock events (when Mac was locked but not display-slept)
+        // Note: Screen unlock notifications come from DistributedNotificationCenter
+        let screenUnlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.logger.info("\("Screens did unlock", privacy: .public)")
+                self?.onScreenWake?()  // Reuse screenWake callback - unlock = wake
+            }
+        }
+        workspaceNotificationObservers.append(screenUnlockObserver)
+        
         logger.info("Sleep/wake event monitoring started (observing \(self.workspaceNotificationObservers.count, privacy: .public) notifications)")
     }
     
@@ -214,9 +231,13 @@ final class PowerManager: PowerManagerProtocol {
     func stopMonitoring() {
         logger.info("Stopping sleep/wake event monitoring")
         
-        let notificationCenter = NSWorkspace.shared.notificationCenter
+        let workspaceNotificationCenter = NSWorkspace.shared.notificationCenter
+        let distributedNotificationCenter = DistributedNotificationCenter.default()
+        
         for observer in workspaceNotificationObservers {
-            notificationCenter.removeObserver(observer)
+            // Remove from both notification centers (will silently ignore if not registered)
+            workspaceNotificationCenter.removeObserver(observer)
+            distributedNotificationCenter.removeObserver(observer)
         }
         workspaceNotificationObservers.removeAll()
         
