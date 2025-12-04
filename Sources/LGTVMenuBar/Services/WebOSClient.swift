@@ -139,10 +139,10 @@ final class WebOSClient: WebOSClientProtocol {
             self.usesSSL = true
             self._connectionState = .connected
             stateChangeCallback(.connected)
-            logger.info("Successfully connected via SSL to \(configuration.name)")
+            logger.info("\("Successfully connected via SSL", privacy: .public) to \(configuration.name)")
             return
         } catch {
-            logger.debug("SSL connection failed: \(error.localizedDescription), trying non-SSL")
+            logger.debug("SSL connection failed: \(error.localizedDescription, privacy: .public), trying non-SSL")
             lastError = error
             // Clean up failed connection
             webSocketTask?.cancel()
@@ -156,10 +156,10 @@ final class WebOSClient: WebOSClientProtocol {
             self.usesSSL = false
             self._connectionState = .connected
             stateChangeCallback(.connected)
-            logger.info("Successfully connected via non-SSL to \(configuration.name)")
+            logger.info("\("Successfully connected via non-SSL", privacy: .public) to \(configuration.name)")
             return
         } catch {
-            logger.error("Non-SSL connection also failed: \(error.localizedDescription)")
+            logger.error("Non-SSL connection also failed: \(error.localizedDescription, privacy: .public)")
             lastError = error
         }
         
@@ -237,7 +237,7 @@ final class WebOSClient: WebOSClientProtocol {
             return
         }
         
-        logger.info("Disconnecting from TV")
+        logger.info("\("Disconnecting from TV", privacy: .public)")
         
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
@@ -253,7 +253,7 @@ final class WebOSClient: WebOSClientProtocol {
         
         stateChangeCallback?(.disconnected)
         
-        logger.info("Disconnected from TV")
+        logger.info("\("Disconnected from TV", privacy: .public)")
     }
     
     /// Send a command to the TV
@@ -273,7 +273,7 @@ final class WebOSClient: WebOSClientProtocol {
             
             webSocketTask?.send(.string(string)) { error in
                 if let error = error {
-                    self.logger.error("Failed to send command: \(error.localizedDescription)")
+                    self.logger.error("Failed to send command: \(error.localizedDescription, privacy: .public)")
                 }
             }
             
@@ -421,7 +421,7 @@ final class WebOSClient: WebOSClientProtocol {
                 }
                 
             } catch {
-                logger.error("Error receiving message: \(error.localizedDescription)")
+                logger.error("Error receiving message: \(error.localizedDescription, privacy: .public)")
                 
                 if _connectionState != .disconnected {
                     _connectionState = .error(error)
@@ -457,7 +457,7 @@ final class WebOSClient: WebOSClientProtocol {
     
     /// Handle registered message
     private func handleRegisteredMessage(_ messageDict: [String: Any]) async {
-        logger.info("Successfully registered with TV")
+        logger.info("\("Successfully registered with TV", privacy: .public)")
         
         // Extract and save client key if present
         if let payload = messageDict["payload"] as? [String: Any],
@@ -467,7 +467,7 @@ final class WebOSClient: WebOSClientProtocol {
                 try keychainManager.saveClientKey(clientKey, for: ipAddress)
                 logger.debug("Saved client key for \(ipAddress)")
             } catch {
-                logger.error("Failed to save client key: \(error.localizedDescription)")
+                logger.error("Failed to save client key: \(error.localizedDescription, privacy: .public)")
             }
         }
         

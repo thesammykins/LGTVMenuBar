@@ -17,6 +17,7 @@ public final class TVController: TVControllerProtocol {
     public private(set) var connectionState: ConnectionState = .disconnected {
         didSet {
             if oldValue != connectionState {
+                logDiagnostic(level: "info", category: "TVController", message: "Connection state changed", metadata: ["oldState": "\(oldValue)", "newState": "\(connectionState)"])
                 Task { await updateMediaKeyCapture() }
             }
         }
@@ -39,6 +40,7 @@ public final class TVController: TVControllerProtocol {
         didSet {
             UserDefaults.standard.set(isMediaKeyControlEnabled, forKey: mediaKeyEnabledKey)
             logger.info("Media key control \(self.isMediaKeyControlEnabled ? "enabled" : "disabled")")
+            logDiagnostic(level: "info", category: "TVController", message: "Media key control \(self.isMediaKeyControlEnabled ? "enabled" : "disabled")")
             Task { await updateMediaKeyCapture() }
         }
     }
@@ -51,6 +53,7 @@ public final class TVController: TVControllerProtocol {
     private let keychainManager: KeychainManagerProtocol
     private let mediaKeyManager: MediaKeyManagerProtocol
     private let launchAtLoginManager: LaunchAtLoginManagerProtocol
+    private let diagnosticLogger: DiagnosticLoggerProtocol
     
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "TVController")
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"
@@ -64,7 +67,8 @@ public final class TVController: TVControllerProtocol {
         powerManager: PowerManagerProtocol,
         keychainManager: KeychainManagerProtocol,
         mediaKeyManager: MediaKeyManagerProtocol,
-        launchAtLoginManager: LaunchAtLoginManagerProtocol
+        launchAtLoginManager: LaunchAtLoginManagerProtocol,
+        diagnosticLogger: DiagnosticLoggerProtocol
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -72,6 +76,7 @@ public final class TVController: TVControllerProtocol {
         self.keychainManager = keychainManager
         self.mediaKeyManager = mediaKeyManager
         self.launchAtLoginManager = launchAtLoginManager
+        self.diagnosticLogger = diagnosticLogger
         
         setupCallbacks()
         loadConfiguration()
@@ -85,7 +90,8 @@ public final class TVController: TVControllerProtocol {
             powerManager: PowerManager(),
             keychainManager: KeychainManager(),
             mediaKeyManager: MediaKeyManager(),
-            launchAtLoginManager: LaunchAtLoginManager()
+            launchAtLoginManager: LaunchAtLoginManager(),
+            diagnosticLogger: DiagnosticLogger()
         )
         
         // Load persisted media key preference (without triggering didSet)
@@ -122,6 +128,7 @@ public final class TVController: TVControllerProtocol {
         }
         
         logger.info("Connecting to \(config.name)")
+        logDiagnostic(level: "info", category: "TVController", message: "Connecting to TV", metadata: ["connectionState": "\(connectionState)"])
         
         try await webOSClient.connect(to: config) { [weak self] state in
             Task { @MainActor in
@@ -147,15 +154,18 @@ public final class TVController: TVControllerProtocol {
             do {
                 try await connect()
                 logger.info("Auto-connect successful on attempt \(attempt)")
+                logDiagnostic(level: "info", category: "TVController", message: "Auto-connect successful", metadata: ["attempt": "\(attempt)"])
                 return
             } catch {
                 logger.warning("Auto-connect attempt \(attempt) failed: \(error.localizedDescription)")
+                logDiagnostic(level: "warning", category: "TVController", message: "Auto-connect attempt failed", metadata: ["attempt": "\(attempt)", "error": error.localizedDescription])
                 if attempt < 3 {
                     try? await Task.sleep(for: .seconds(Double(attempt) * 2))
                 }
             }
         }
         logger.error("Auto-connect failed after 3 attempts")
+        logDiagnostic(level: "error", category: "TVController", message: "Auto-connect failed after 3 attempts")
     }
     
     /// Wake TV via Wake-on-LAN
@@ -333,6 +343,7 @@ public final class TVController: TVControllerProtocol {
         guard let config = configuration, config.wakeWithMac else { return }
         
         logger.info("Mac woke - waking TV")
+        logDiagnostic(level: "info", category: "TVController", message: "Mac woke - waking TV")
         do {
             try await wake()
             // Wait a bit for TV to boot, then connect
@@ -357,6 +368,7 @@ public final class TVController: TVControllerProtocol {
             }
         } catch {
             logger.error("Failed to wake TV: \(error.localizedDescription)")
+            logDiagnostic(level: "error", category: "TVController", message: "Failed to wake TV", metadata: ["error": error.localizedDescription])
         }
     }
     
@@ -367,6 +379,7 @@ public final class TVController: TVControllerProtocol {
         if let currentInput = currentInput {
             if currentInput.rawValue != config.preferredInput {
                 logger.info("Skipping TV sleep - TV is on different input: \(currentInput.displayName) (preferred: \(config.preferredInput))")
+                logDiagnostic(level: "info", category: "TVController", message: "Skipping TV sleep - different input", metadata: ["currentInput": currentInput.displayName, "preferredInput": config.preferredInput])
                 disconnect()
                 return
             }
@@ -375,10 +388,12 @@ public final class TVController: TVControllerProtocol {
         // since we can't determine what the user is doing
         
         logger.info("Mac sleeping - turning off TV")
+        logDiagnostic(level: "info", category: "TVController", message: "Mac sleeping - turning off TV")
         do {
             try await powerOff()
         } catch {
             logger.error("Failed to turn off TV: \(error.localizedDescription)")
+            logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["error": error.localizedDescription])
         }
         disconnect()
     }
@@ -393,12 +408,14 @@ public final class TVController: TVControllerProtocol {
                 }
             } catch {
                 logger.error("Failed to start media key capture: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to start media key capture", metadata: ["error": error.localizedDescription])
             }
         } else {
             do {
                 try await mediaKeyManager.stopMediaKeyCapture()
             } catch {
                 logger.error("Failed to stop media key capture: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to stop media key capture", metadata: ["error": error.localizedDescription])
             }
         }
     }
@@ -417,6 +434,13 @@ public final class TVController: TVControllerProtocol {
             }
         } catch {
             logger.error("Failed to handle media key: \(error.localizedDescription)")
+            logDiagnostic(level: "error", category: "TVController", message: "Failed to handle media key", metadata: ["error": error.localizedDescription])
         }
+    }
+    
+    // MARK: - Diagnostic Logging
+    
+    private func logDiagnostic(level: String, category: String, message: String, metadata: [String: String]? = nil) {
+        diagnosticLogger.log(level: level, category: category, message: message, metadata: metadata)
     }
 }

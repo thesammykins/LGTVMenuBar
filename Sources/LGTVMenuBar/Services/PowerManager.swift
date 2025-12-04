@@ -88,10 +88,10 @@ final class PowerManager: PowerManagerProtocol {
                     if result == kIOReturnSuccess {
                         self.powerAssertionID = assertionID
                         self._isPreventingSleep = true
-                        self.logger.info("Sleep prevention enabled (assertion ID: \(assertionID))")
+                        self.logger.info("Sleep prevention enabled (assertion ID: \(assertionID, privacy: .public))")
                         continuation.resume()
                     } else {
-                        self.logger.error("Failed to create power assertion: \(result)")
+                        self.logger.error("Failed to create power assertion: \(result, privacy: .public)")
                         continuation.resume(throwing: LGTVError.powerManagementError("Failed to prevent system sleep (code: \(result))"))
                     }
                 }
@@ -123,10 +123,10 @@ final class PowerManager: PowerManagerProtocol {
                     if result == kIOReturnSuccess {
                         self.powerAssertionID = nil
                         self._isPreventingSleep = false
-                        self.logger.info("Sleep prevention disabled")
+                        self.logger.info("\("Sleep prevention disabled", privacy: .public)")
                         continuation.resume()
                     } else {
-                        self.logger.error("Failed to release power assertion: \(result)")
+                        self.logger.error("Failed to release power assertion: \(result, privacy: .public)")
                         continuation.resume(throwing: LGTVError.powerManagementError("Failed to allow system sleep (code: \(result))"))
                     }
                 }
@@ -162,7 +162,7 @@ final class PowerManager: PowerManagerProtocol {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.logger.info("System will sleep")
+                self?.logger.info("\("System will sleep", privacy: .public)")
                 self?.onSleep?()
             }
         }
@@ -175,7 +175,7 @@ final class PowerManager: PowerManagerProtocol {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.logger.info("System did wake")
+                self?.logger.info("\("System did wake", privacy: .public)")
                 self?.onWake?()
             }
         }
@@ -188,7 +188,7 @@ final class PowerManager: PowerManagerProtocol {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.logger.info("Screens did sleep")
+                self?.logger.info("\("Screens did sleep", privacy: .public)")
                 self?.onScreenSleep?()
             }
         }
@@ -201,13 +201,13 @@ final class PowerManager: PowerManagerProtocol {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.logger.info("Screens did wake")
+                self?.logger.info("\("Screens did wake", privacy: .public)")
                 self?.onScreenWake?()
             }
         }
         workspaceNotificationObservers.append(screenWakeObserver)
         
-        logger.info("Sleep/wake event monitoring started (observing \(self.workspaceNotificationObservers.count) notifications)")
+        logger.info("Sleep/wake event monitoring started (observing \(self.workspaceNotificationObservers.count, privacy: .public) notifications)")
     }
     
     /// Stop monitoring system sleep/wake events
@@ -220,6 +220,6 @@ final class PowerManager: PowerManagerProtocol {
         }
         workspaceNotificationObservers.removeAll()
         
-        logger.info("Sleep/wake event monitoring stopped")
+        logger.info("\("Sleep/wake event monitoring stopped", privacy: .public)")
     }
 }

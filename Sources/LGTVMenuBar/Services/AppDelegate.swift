@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         
-        logger.info("Application launched successfully")
+        logger.info("\("Application launched successfully", privacy: .public)")
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         guard let button = statusItem?.button else {
-            logger.error("Failed to create status bar button")
+            logger.error("\("Failed to create status bar button", privacy: .public)")
             return
         }
         
