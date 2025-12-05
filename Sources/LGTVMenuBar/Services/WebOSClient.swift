@@ -116,9 +116,24 @@ final class WebOSClient: WebOSClientProtocol {
     ///   - stateChangeCallback: Closure called when connection state changes
     /// - Throws: `LGTVError.webosError` if connection fails
     func connect(to configuration: TVConfiguration, stateChangeCallback: @escaping @Sendable (ConnectionState) -> Void) async throws {
-        guard _connectionState == .disconnected else {
+        // Allow reconnection from disconnected or error states
+        // If already connected or connecting, skip
+        if _connectionState == .connected || _connectionState == .connecting {
             logger.warning("Already connected or connecting")
             return
+        }
+        
+        // Clean up any existing connection state before reconnecting (e.g., recovering from error state)
+        if _connectionState != .disconnected {
+            logger.info("Cleaning up previous connection state before reconnecting")
+            webSocketTask?.cancel()
+            webSocketTask = nil
+            handshakeCompleted = false
+            // Fail any pending requests
+            for (_, continuation) in pendingRequests {
+                continuation.resume(throwing: LGTVError.webosError("Connection reset"))
+            }
+            pendingRequests.removeAll()
         }
         
         logger.info("Connecting to \(configuration.name) at \(configuration.ipAddress)")

@@ -373,6 +373,10 @@ public final class TVController: TVControllerProtocol {
         
         logger.info("Mac woke - waking TV")
         logDiagnostic(level: "info", category: "TVController", message: "Mac woke - waking TV")
+        
+        // Always disconnect first to ensure clean state for reconnection
+        disconnect()
+        
         do {
             try await wake()
             // Wait a bit for TV to boot, then connect
