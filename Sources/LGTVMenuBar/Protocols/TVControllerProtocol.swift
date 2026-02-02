@@ -11,6 +11,7 @@ public protocol TVControllerProtocol: Sendable {
     var volume: Int { get }
     var isMuted: Bool { get }
     var currentInput: TVInputType? { get }
+    var soundOutput: TVSoundOutput { get }
     var isMediaKeyControlEnabled: Bool { get set }
     
     /// Diagnostic logger for troubleshooting and log export
@@ -44,6 +45,7 @@ public protocol TVControllerProtocol: Sendable {
     // MARK: - Input Control
     
     func switchInput(_ input: TVInputType) async throws
+    func setSoundOutput(_ output: TVSoundOutput) async throws
     
     // MARK: - Launch at Login
     

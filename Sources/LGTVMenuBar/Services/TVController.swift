@@ -35,6 +35,9 @@ public final class TVController: TVControllerProtocol {
     /// Current input
     public private(set) var currentInput: TVInputType?
     
+    /// Current sound output
+    public private(set) var soundOutput: TVSoundOutput = .unknown
+    
     /// Whether media key capture is enabled
     public var isMediaKeyControlEnabled: Bool = false {
         didSet {
@@ -59,6 +62,9 @@ public final class TVController: TVControllerProtocol {
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "TVController")
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"
     private let configurationKey = "tv_configuration"
+    private var diagnosticCaptureUntil: Date?
+    private var diagnosticCaptureRestoreState: (enabled: Bool, debug: Bool)?
+    private var diagnosticCaptureTimer: Timer?
     
     // MARK: - Debouncing
     /// Timestamp of last wake execution (for debouncing rapid wake events)
@@ -146,6 +152,8 @@ public final class TVController: TVControllerProtocol {
                 self?.connectionState = state
             }
         }
+
+        await requestDeviceDetailsCommands()
     }
     
     /// Disconnect from the TV
@@ -243,6 +251,67 @@ public final class TVController: TVControllerProtocol {
         currentInput = input
     }
     
+    /// Set TV sound output
+    /// - Parameter output: The sound output to switch to
+    public func setSoundOutput(_ output: TVSoundOutput) async throws {
+        try await webOSClient.sendCommand(.setSoundOutput(output.rawValue))
+        soundOutput = output
+    }
+
+    // MARK: - Diagnostics
+
+    public func setDiagnosticLoggingEnabled(_ enabled: Bool) {
+        if enabled {
+            diagnosticLogger.enable()
+        } else {
+            diagnosticLogger.disable()
+        }
+
+        updateDiagnosticCaptureSchedule()
+    }
+
+    public func setDiagnosticDebugMode(_ enabled: Bool) {
+        diagnosticLogger.setDebugMode(enabled)
+        updateDiagnosticCaptureSchedule()
+    }
+
+    public func gatherDeviceDetails() async -> Bool {
+        guard connectionState.isConnected else {
+            logDiagnostic(level: "warning", category: "TVController", message: "Device details capture skipped - not connected", metadata: deviceDetailsMetadata())
+            return false
+        }
+
+        let wasEnabled = diagnosticLogger.isEnabled
+        let wasDebugMode = diagnosticLogger.isDebugMode
+
+        if !wasEnabled {
+            diagnosticLogger.enable()
+        }
+
+        if !wasDebugMode {
+            diagnosticLogger.setDebugMode(true)
+        }
+
+        if !wasEnabled || !wasDebugMode {
+            diagnosticCaptureRestoreState = (enabled: wasEnabled, debug: wasDebugMode)
+        }
+
+        diagnosticCaptureUntil = Date().addingTimeInterval(8)
+        updateDiagnosticCaptureSchedule()
+
+        logDiagnostic(level: "warning", category: "TVController", message: "Device details capture requested", metadata: deviceDetailsMetadata())
+
+        await requestDeviceDetailsCommands()
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            self?.diagnosticCaptureUntil = nil
+            self?.restoreDiagnosticStateIfNeeded()
+        }
+
+        return true
+    }
+    
     /// Set PC mode for a specific input
     /// - Parameters:
     ///   - input: The input to set PC mode on
@@ -269,6 +338,20 @@ public final class TVController: TVControllerProtocol {
             try await launchAtLoginManager.disableLaunchAtLogin()
         }
     }
+
+    // MARK: - Accessibility
+
+    public func hasAccessibilityPermission() -> Bool {
+        mediaKeyManager.hasAccessibilityPermission
+    }
+
+    public func requestAccessibilityPermission() -> Bool {
+        mediaKeyManager.requestAccessibilityPermission()
+    }
+
+    public func refreshMediaKeyCapture() {
+        Task { await updateMediaKeyCapture() }
+    }
     
     // MARK: - Private Methods
     
@@ -285,7 +368,11 @@ public final class TVController: TVControllerProtocol {
         webOSClient.setInputChangeCallback { [weak self] input in
             guard let self = self else { return }
             Task { @MainActor [weak self] in
-                self?.currentInput = input
+                guard let self = self else { return }
+                self.currentInput = input
+                if self.isDiagnosticCaptureActive {
+                    self.logDiagnostic(level: "warning", category: "TVController", message: "Current input updated", metadata: ["currentInput": input.displayName])
+                }
             }
         }
         
@@ -310,6 +397,32 @@ public final class TVController: TVControllerProtocol {
                         self?.logger.info("TV input \(config.preferredInput) is in PC mode")
                     }
                 }
+            }
+        }
+        
+        // WebOS sound output changes
+        webOSClient.setSoundOutputChangeCallback { [weak self] output in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+
+                if output == .unknown && self.soundOutput != .unknown {
+                    if self.isDiagnosticCaptureActive {
+                        self.logDiagnostic(level: "warning", category: "TVController", message: "Ignored unknown sound output", metadata: ["currentSoundOutput": self.soundOutput.displayName])
+                    }
+                    return
+                }
+
+                self.soundOutput = output
+                if self.isDiagnosticCaptureActive {
+                    self.logDiagnostic(level: "warning", category: "TVController", message: "Sound output updated", metadata: ["soundOutput": output.displayName])
+                }
+            }
+        }
+
+        webOSClient.setDiagnosticPayloadCallback { [weak self] messageType, payloadJSON in
+            guard let self = self else { return }
+            if self.isDiagnosticCaptureActive {
+                self.logDiagnostic(level: "warning", category: "WebOSClient", message: "Captured \(messageType) payload", metadata: ["payload": payloadJSON])
             }
         }
         
@@ -448,6 +561,12 @@ public final class TVController: TVControllerProtocol {
     
     private func updateMediaKeyCapture() async {
         if isMediaKeyControlEnabled && connectionState.isConnected {
+            if !mediaKeyManager.hasAccessibilityPermission {
+                logger.warning("Disabling media key control - Accessibility permission not granted")
+                logDiagnostic(level: "warning", category: "TVController", message: "Disabling media key control - Accessibility permission not granted", metadata: appIdentityMetadata())
+                isMediaKeyControlEnabled = false
+                return
+            }
             do {
                 try await mediaKeyManager.startMediaKeyCapture { [weak self] key in
                     Task { @MainActor in
@@ -456,7 +575,10 @@ public final class TVController: TVControllerProtocol {
                 }
             } catch {
                 logger.error("Failed to start media key capture: \(error.localizedDescription)")
-                logDiagnostic(level: "error", category: "TVController", message: "Failed to start media key capture", metadata: ["error": error.localizedDescription])
+                var metadata = appIdentityMetadata()
+                metadata["error"] = error.localizedDescription
+                metadata["accessibilityTrusted"] = "\(mediaKeyManager.hasAccessibilityPermission)"
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to start media key capture", metadata: metadata)
             }
         } else {
             do {
@@ -490,5 +612,113 @@ public final class TVController: TVControllerProtocol {
     
     private func logDiagnostic(level: String, category: String, message: String, metadata: [String: String]? = nil) {
         diagnosticLogger.log(level: level, category: category, message: message, metadata: metadata)
+    }
+
+    private func appIdentityMetadata() -> [String: String] {
+        var metadata: [String: String] = [:]
+        metadata["bundleIdentifier"] = Bundle.main.bundleIdentifier ?? "unknown"
+        metadata["bundlePath"] = Bundle.main.bundleURL.path
+        metadata["executablePath"] = Bundle.main.executableURL?.path ?? "unknown"
+        return metadata
+    }
+
+    private func deviceDetailsMetadata() -> [String: String] {
+        var metadata: [String: String] = [
+            "connectionState": "\(connectionState)",
+            "currentInput": currentInput?.displayName ?? "unknown",
+            "soundOutput": soundOutput.displayName,
+            "volume": "\(volume)",
+            "isMuted": "\(isMuted)"
+        ]
+
+        if let config = configuration {
+            metadata["tvName"] = config.name
+            metadata["ipAddress"] = config.ipAddress
+            metadata["preferredInput"] = config.preferredInput
+        }
+
+        return metadata
+    }
+
+    private var isDiagnosticCaptureActive: Bool {
+        if let captureUntil = diagnosticCaptureUntil {
+            return Date() <= captureUntil
+        }
+        return false
+    }
+
+    private func restoreDiagnosticStateIfNeeded() {
+        guard let restoreState = diagnosticCaptureRestoreState else { return }
+
+        diagnosticLogger.setDebugMode(restoreState.debug)
+        if !restoreState.enabled {
+            diagnosticLogger.disable()
+        }
+
+        diagnosticCaptureRestoreState = nil
+        updateDiagnosticCaptureSchedule()
+    }
+
+    private func updateDiagnosticCaptureSchedule() {
+        if diagnosticLogger.isEnabled && diagnosticLogger.isDebugMode {
+            startDiagnosticCaptureTimer()
+        } else {
+            stopDiagnosticCaptureTimer()
+        }
+    }
+
+    private func startDiagnosticCaptureTimer() {
+        stopDiagnosticCaptureTimer()
+
+        diagnosticCaptureTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.capturePeriodicDiagnostics()
+            }
+        }
+    }
+
+    private func stopDiagnosticCaptureTimer() {
+        diagnosticCaptureTimer?.invalidate()
+        diagnosticCaptureTimer = nil
+    }
+
+    private func capturePeriodicDiagnostics() {
+        guard connectionState.isConnected else {
+            logDiagnostic(level: "info", category: "TVController", message: "Skipped periodic capture - not connected", metadata: deviceDetailsMetadata())
+            return
+        }
+
+        logDiagnostic(level: "info", category: "TVController", message: "Periodic device status snapshot", metadata: deviceDetailsMetadata())
+
+        Task { @MainActor in
+            await requestDeviceDetailsCommands()
+        }
+    }
+
+    private func requestDeviceDetailsCommands() async {
+        do {
+            try await webOSClient.sendCommand(.getCurrentForegroundAppInfo)
+        } catch {
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request foreground app info", metadata: ["error": error.localizedDescription])
+        }
+
+        do {
+            try await webOSClient.sendCommand(.getInputList)
+        } catch {
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request input list", metadata: ["error": error.localizedDescription])
+        }
+
+        do {
+            try await webOSClient.sendCommand(.getSoundOutput)
+        } catch {
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request sound output", metadata: ["error": error.localizedDescription])
+        }
+
+        do {
+            try await webOSClient.sendCommand(.getVolume)
+        } catch {
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request volume", metadata: ["error": error.localizedDescription])
+        }
     }
 }

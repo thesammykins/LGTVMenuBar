@@ -86,6 +86,9 @@ final class MockTVController: TVControllerProtocol, Sendable {
     /// Current input
     var currentInput: TVInputType?
     
+    /// Current sound output
+    var soundOutput: TVSoundOutput = .unknown
+    
     /// Whether media key control is enabled
     var isMediaKeyControlEnabled: Bool = false
     
@@ -282,6 +285,18 @@ final class MockTVController: TVControllerProtocol, Sendable {
         currentInput = input
     }
     
+    func setSoundOutput(_ output: TVSoundOutput) async throws {
+        if operationDelay > 0 {
+            try await Task.sleep(for: .seconds(operationDelay))
+        }
+        
+        if shouldThrowError {
+            throw errorToThrow
+        }
+        
+        soundOutput = output
+    }
+    
     func isLaunchAtLoginEnabled() async throws -> Bool {
         isLaunchAtLoginEnabledCalls.append(Date())
         
@@ -337,6 +352,7 @@ final class MockTVController: TVControllerProtocol, Sendable {
         volume = 50
         isMuted = false
         currentInput = nil
+        soundOutput = .unknown
         isMediaKeyControlEnabled = false
         mockLaunchAtLoginEnabled = false
         

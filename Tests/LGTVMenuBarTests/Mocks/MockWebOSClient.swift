@@ -39,6 +39,8 @@ final class MockWebOSClient: WebOSClientProtocol {
     private var inputChangeCallback: (@Sendable (TVInputType) -> Void)?
     private var volumeChangeCallback: (@Sendable (Int, Bool) -> Void)?
     private var inputListCallback: (@Sendable ([String: String]) -> Void)?
+    private var soundOutputChangeCallback: (@Sendable (TVSoundOutput) -> Void)?
+    private var diagnosticPayloadCallback: ((String, String) -> Void)?
     
     // MARK: - WebOSClientProtocol Implementation
     
@@ -98,6 +100,14 @@ final class MockWebOSClient: WebOSClientProtocol {
         self.inputListCallback = callback
     }
     
+    func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void) {
+        self.soundOutputChangeCallback = callback
+    }
+
+    func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void) {
+        self.diagnosticPayloadCallback = callback
+    }
+    
     // MARK: - Test Helpers
     
     /// Reset all mock state
@@ -117,6 +127,8 @@ final class MockWebOSClient: WebOSClientProtocol {
         inputChangeCallback = nil
         volumeChangeCallback = nil
         inputListCallback = nil
+        soundOutputChangeCallback = nil
+        diagnosticPayloadCallback = nil
     }
     
     /// Get number of times connect was called
@@ -173,6 +185,11 @@ final class MockWebOSClient: WebOSClientProtocol {
     /// Simulate input list update
     func simulateInputListUpdate(_ inputIcons: [String: String]) {
         inputListCallback?(inputIcons)
+    }
+    
+    /// Simulate sound output change
+    func simulateSoundOutputChange(_ soundOutput: TVSoundOutput) {
+        soundOutputChangeCallback?(soundOutput)
     }
     
     /// Check if connect was called within the specified time interval
