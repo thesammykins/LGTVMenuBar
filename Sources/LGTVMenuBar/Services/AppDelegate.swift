@@ -61,6 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         logger.info("Application terminating")
     }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard let controller = controller else { return }
+        controller.refreshMediaKeyCapture()
+    }
     
     // MARK: - Status Item Setup
     
@@ -185,6 +190,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // This ensures buttons, toggles, pickers work correctly
         popover.contentViewController?.view.window?.makeKey()
         NSApp.activate(ignoringOtherApps: true)
+
+        if controller.configuration != nil && (controller.connectionState.isDisconnected || controller.connectionState.hasError) {
+            Task {
+                try? await controller.connect()
+            }
+        }
         
         logger.debug("Popover shown")
     }

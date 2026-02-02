@@ -341,11 +341,14 @@ struct GeneralTab: View {
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Button("Grant Access") {
-                                    openAccessibilitySettings()
+                                    requestAccessibilityPermission()
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                             }
+                            Text("If already granted, remove LGTV Menu Bar from Accessibility and re-add it.")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
                         } else if mediaKeysEnabled {
                             HStack {
                                 Image(systemName: "checkmark.circle.fill")
@@ -401,7 +404,12 @@ struct GeneralTab: View {
     
     private func checkAccessibilityPermission() {
         let wasGranted = hasAccessibilityPermission
-        hasAccessibilityPermission = AXIsProcessTrusted()
+        hasAccessibilityPermission = controller.hasAccessibilityPermission()
+
+        if !hasAccessibilityPermission && controller.isMediaKeyControlEnabled {
+            controller.isMediaKeyControlEnabled = false
+            mediaKeysEnabled = false
+        }
         
         // If just granted, stop polling and reinitialize media key capture
         if !wasGranted && hasAccessibilityPermission {
@@ -448,6 +456,18 @@ struct GeneralTab: View {
             NSWorkspace.shared.open(url)
         }
     }
+
+    private func requestAccessibilityPermission() {
+        let granted = controller.requestAccessibilityPermission()
+        if !granted {
+            openAccessibilitySettings()
+        }
+        checkAccessibilityPermission()
+        startPermissionPollingIfNeeded()
+        if hasAccessibilityPermission {
+            controller.refreshMediaKeyCapture()
+        }
+    }
 }
 
 // MARK: - Diagnostics Tab
@@ -463,6 +483,8 @@ struct DiagnosticsTab: View {
     @State private var showingClipboardSuccess = false
     @State private var showingError = false
     @State private var errorMessage: String = ""
+    @State private var showingDeviceDetailsSuccess = false
+    @State private var isCapturingDeviceDetails = false
     
     var body: some View {
         Form {
@@ -470,11 +492,7 @@ struct DiagnosticsTab: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Enable Diagnostic Logging", isOn: $isLoggingEnabled)
                         .onChange(of: isLoggingEnabled) { _, newValue in
-                            if newValue {
-                                controller.diagnosticLogger.enable()
-                            } else {
-                                controller.diagnosticLogger.disable()
-                            }
+                            controller.setDiagnosticLoggingEnabled(newValue)
                             updateCounts()
                         }
                     
@@ -487,7 +505,7 @@ struct DiagnosticsTab: View {
                     Toggle("Enable Debug Mode", isOn: $isDebugMode)
                         .help("Captures all log levels (debug, info, warning, error)")
                         .onChange(of: isDebugMode) { _, newValue in
-                            controller.diagnosticLogger.setDebugMode(newValue)
+                            controller.setDiagnosticDebugMode(newValue)
                         }
                 }
             } header: {
@@ -520,6 +538,12 @@ struct DiagnosticsTab: View {
             }
             
             Section {
+                Button("Gather Device Details") {
+                    captureDeviceDetails()
+                }
+                .disabled(!controller.connectionState.isConnected || isCapturingDeviceDetails)
+                .help("Captures raw TV payloads for input and sound output diagnosis")
+
                 Button("Export Logs to Desktop") {
                     exportToDesktop()
                 }
@@ -567,6 +591,11 @@ struct DiagnosticsTab: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Diagnostic logs copied as JSON")
+        }
+        .alert("Device Details Captured", isPresented: $showingDeviceDetailsSuccess) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Device details captured. Export logs to share the payload.")
         }
         .alert("Error", isPresented: $showingError) {
             Button("OK", role: .cancel) { }
@@ -631,6 +660,23 @@ struct DiagnosticsTab: View {
         } catch {
             errorMessage = "Failed to copy logs: \(error.localizedDescription)"
             showingError = true
+        }
+    }
+
+    private func captureDeviceDetails() {
+        isCapturingDeviceDetails = true
+
+        Task {
+            let captured = await controller.gatherDeviceDetails()
+            isCapturingDeviceDetails = false
+
+            if captured {
+                showingDeviceDetailsSuccess = true
+                updateCounts()
+            } else {
+                errorMessage = "Connect to a TV first, then try again."
+                showingError = true
+            }
         }
     }
 }
