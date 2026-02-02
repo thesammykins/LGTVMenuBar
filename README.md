@@ -1,6 +1,18 @@
-# LGTVMenuBar
+<h1>
+  <img src="images/menubar-small.png" alt="LGTVMenuBar icon" width="24" height="24" /> LGTVMenuBar
+</h1>
 
 A native macOS menu bar app for controlling LG WebOS TVs.
+
+## Screenshots
+
+| Menu bar (compact) | Menu bar (expanded) |
+| --- | --- |
+| <a href="images/menubar-small.png"><img src="images/menubar-small.png" alt="Menu bar compact" width="320" /></a><br><sub>Compact status view</sub> | <a href="images/menubar-expanded.png"><img src="images/menubar-expanded.png" alt="Menu bar expanded" width="320" /></a><br><sub>Expanded controls</sub> |
+
+| General settings | Automation settings | Diagnostics |
+| --- | --- | --- |
+| <a href="images/general.png"><img src="images/general.png" alt="General settings" width="240" /></a><br><sub>Connection and input preferences</sub> | <a href="images/automation.png"><img src="images/automation.png" alt="Automation settings" width="240" /></a><br><sub>Wake/sleep and input rules</sub> | <a href="images/diagnostics.png"><img src="images/diagnostics.png" alt="Diagnostics" width="240" /></a><br><sub>Logging and export tools</sub> |
 
 ## Features
 

@@ -12,6 +12,9 @@ public enum WebOSCommand: Sendable {
     case setVolume(Int)
     case getVolume
     case subscribeVolume
+    case getSoundOutput
+    case subscribeSoundOutput
+    case setSoundOutput(String)
     case mute
     case unmute
     case setInput(String)

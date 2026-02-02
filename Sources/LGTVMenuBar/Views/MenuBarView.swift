@@ -21,9 +21,9 @@ public struct MenuBarView: View {
             
             // Only show controls if connected
             if controller.connectionState.isConnected {
-                QuickActionsSection(controller: controller)
+                QuickActionsSection(controller: controller, audioOutputType: audioOutputType)
                 Divider()
-                VolumeSection(controller: controller, audioOutputType: audioOutputType)
+                VolumeSection(controller: controller)
                 Divider()
             } else if controller.configuration != nil {
                 ConnectionSection(controller: controller)
@@ -153,6 +153,7 @@ private struct ConnectionSection: View {
 
 private struct QuickActionsSection: View {
     @Bindable var controller: TVController
+    let audioOutputType: AudioOutputType
     
     var body: some View {
         VStack(spacing: 8) {
@@ -191,29 +192,65 @@ private struct QuickActionsSection: View {
                 .buttonStyle(.bordered)
             }
             
-            // Row 2: Input picker (full width)
-            Menu {
-                ForEach(TVInputType.allCases, id: \.self) { input in
-                    Button(input.displayName) {
-                        Task { try? await controller.switchInput(input) }
+            // Row 2: Input picker and Sound Output picker (side by side)
+            HStack(spacing: 8) {
+                // Input picker
+                Menu {
+                    ForEach(TVInputType.allCases, id: \.self) { input in
+                        Button(input.displayName) {
+                            Task { try? await controller.switchInput(input) }
+                        }
                     }
+                } label: {
+                    HStack {
+                        Image(systemName: "tv")
+                        Text(controller.currentInput?.displayName ?? "Select Input")
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(.quaternary)
+                    .cornerRadius(6)
                 }
-            } label: {
-                HStack {
-                    Image(systemName: "tv")
-                    Text(controller.currentInput?.displayName ?? "Select Input")
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                .menuStyle(.borderlessButton)
+                
+                // Sound output picker (only show when Mac audio goes to TV)
+                if audioOutputType == .hdmi {
+                    Menu {
+                        Button("TV Speaker") {
+                            Task { try? await controller.setSoundOutput(.tvSpeaker) }
+                        }
+                        Button("HDMI ARC") {
+                            Task { try? await controller.setSoundOutput(.externalArc) }
+                        }
+                        Button("Optical") {
+                            Task { try? await controller.setSoundOutput(.externalOptical) }
+                        }
+                        Button("Headphone") {
+                            Task { try? await controller.setSoundOutput(.headphone) }
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "speaker.wave.2")
+                            Text(controller.soundOutput.displayName)
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(.quaternary)
+                        .cornerRadius(6)
+                    }
+                    .menuStyle(.borderlessButton)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(.quaternary)
-                .cornerRadius(6)
             }
-            .menuStyle(.borderlessButton)
         }
     }
 }
@@ -222,7 +259,6 @@ private struct QuickActionsSection: View {
 
 private struct VolumeSection: View {
     @Bindable var controller: TVController
-    let audioOutputType: AudioOutputType
     @State private var sliderPosition: Double = 0.5  // 0-1 range, maps to volume via curve
     
     /// Convert slider position (0-1) to volume (0-100) with power curve
@@ -238,8 +274,8 @@ private struct VolumeSection: View {
     
     var body: some View {
         VStack(spacing: 8) {
-            // Show different UI based on audio output type
-            if audioOutputType.supportsVolumeSlider {
+            // Show different UI based on TV sound output type
+            if controller.soundOutput.supportsVolumeSlider {
                 // Built-in speakers: show slider with volume level
                 sliderVolumeControl
             } else {
@@ -249,6 +285,12 @@ private struct VolumeSection: View {
         }
         .onChange(of: controller.volume) { _, newValue in
             sliderPosition = volumeToSlider(newValue)
+        }
+        .onAppear {
+            sliderPosition = volumeToSlider(controller.volume)
+        }
+        .onChange(of: controller.soundOutput) { _, _ in
+            sliderPosition = volumeToSlider(controller.volume)
         }
     }
     

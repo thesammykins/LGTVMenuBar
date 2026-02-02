@@ -12,6 +12,8 @@ public protocol WebOSClientProtocol {
     func setInputChangeCallback(_ callback: @escaping @Sendable (TVInputType) -> Void)
     func setVolumeChangeCallback(_ callback: @escaping @Sendable (Int, Bool) -> Void)
     func setInputListCallback(_ callback: @escaping @Sendable ([String: String]) -> Void)
+    func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void)
+    func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void)
 }
 
 /// Custom URLSession delegate for accepting self-signed certificates
@@ -64,6 +66,12 @@ final class WebOSClient: WebOSClientProtocol {
     
     /// Callback for input list with icons
     private var inputListCallback: (@Sendable ([String: String]) -> Void)?
+    
+    /// Callback for sound output changes
+    private var soundOutputChangeCallback: (@Sendable (TVSoundOutput) -> Void)?
+
+    /// Callback for raw payload diagnostics
+    private var diagnosticPayloadCallback: ((String, String) -> Void)?
     
     /// Handshake completion flag
     private var handshakeCompleted = false
@@ -321,6 +329,16 @@ final class WebOSClient: WebOSClientProtocol {
         self.inputListCallback = callback
     }
     
+    /// Set callback for sound output changes
+    /// - Parameter callback: Closure called when sound output changes
+    func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void) {
+        self.soundOutputChangeCallback = callback
+    }
+
+    func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void) {
+        self.diagnosticPayloadCallback = callback
+    }
+    
     // MARK: - Private Methods
     
     /// Perform handshake with the TV
@@ -495,25 +513,49 @@ final class WebOSClient: WebOSClientProtocol {
         
         // Subscribe to volume changes (will push updates when volume changes)
         try? await sendCommand(WebOSCommand.subscribeVolume)
+        
+        // Subscribe to sound output changes
+        try? await sendCommand(WebOSCommand.subscribeSoundOutput)
+        
+        // Query initial sound output state (subscription may not send initial value)
+        try? await sendCommand(WebOSCommand.getSoundOutput)
     }
     
     /// Handle response message
     private func handleResponseMessage(_ messageDict: [String: Any]) async {
         guard let payload = messageDict["payload"] as? [String: Any] else { return }
+
+        // Debug: log full payload for diagnosis
+        logger.debug("Response payload keys: \(payload.keys.sorted())")
+
+        if let callback = diagnosticPayloadCallback {
+            callback("response", diagnosticPayloadJSON(from: payload))
+        }
         
         // Check for volume data in response
         if let volume = payload["volume"] as? Int {
             let isMuted = payload["muted"] as? Bool ?? false
             volumeChangeCallback?(volume, isMuted)
             logger.debug("Volume update: \(volume), muted: \(isMuted)")
+        } else if let volumeStatus = payload["volumeStatus"] as? [String: Any],
+                  let volume = volumeStatus["volume"] as? Int {
+            let isMuted = volumeStatus["muteStatus"] as? Bool ?? volumeStatus["muted"] as? Bool ?? false
+            volumeChangeCallback?(volume, isMuted)
+            logger.debug("Volume update from volumeStatus: \(volume), muted: \(isMuted)")
         }
         
         // Check for foreground app data (current input) in response
-        if let appId = payload["appId"] as? String {
+        if let appId = extractAppId(from: payload) {
             if let inputType = mapAppIdToInputType(appId) {
                 inputChangeCallback?(inputType)
                 logger.debug("Current input from appId: \(appId) -> \(inputType.displayName)")
             }
+        }
+
+        if let inputSource = extractInputSource(from: payload) {
+            let inputType = mapInputSourceToType(inputSource)
+            inputChangeCallback?(inputType)
+            logger.debug("Current input from input source: \(inputSource) -> \(inputType.displayName)")
         }
         
         // Check for input list data in response (from getInputList / getExternalInputList)
@@ -530,24 +572,57 @@ final class WebOSClient: WebOSClientProtocol {
                 inputListCallback?(inputIcons)
             }
         }
+        
+        // Check for sound output data in response (from getSoundOutput or subscribeSoundOutput)
+        // WebOS API may use "soundOutput" or "output" as the key
+        if let soundOutputStr = extractSoundOutput(from: payload) {
+            let soundOutput = TVSoundOutput.fromAPIValue(soundOutputStr)
+            soundOutputChangeCallback?(soundOutput)
+            logger.debug("Sound output: \(soundOutputStr) -> \(soundOutput.displayName)")
+        }
     }
     
     /// Handle push message
     private func handlePushMessage(_ messageDict: [String: Any]) async {
         guard let payload = messageDict["payload"] as? [String: Any] else { return }
+
+        // Debug: log push payload for diagnosis
+        logger.debug("Push payload keys: \(payload.keys.sorted())")
+
+        if let callback = diagnosticPayloadCallback {
+            callback("push", diagnosticPayloadJSON(from: payload))
+        }
         
-        // Handle different push types
-        if payload.keys.contains("foregroundAppInfo") {
-            await handleForegroundAppUpdate(payload)
-        } else if payload.keys.contains("inputSource") {
-            await handleInputChange(payload)
-        } else if payload.keys.contains("volume") {
-            // Volume subscription push
-            if let volume = payload["volume"] as? Int {
-                let isMuted = payload["muted"] as? Bool ?? false
-                volumeChangeCallback?(volume, isMuted)
-                logger.debug("Volume push: \(volume), muted: \(isMuted)")
+        if let appId = extractAppId(from: payload) {
+            if let inputType = mapAppIdToInputType(appId) {
+                inputChangeCallback?(inputType)
+                logger.debug("Foreground app input: \(appId) -> \(inputType.displayName)")
             }
+        }
+
+        if let inputSource = extractInputSource(from: payload) {
+            let inputType = mapInputSourceToType(inputSource)
+            inputChangeCallback?(inputType)
+            logger.debug("Input change: \(inputSource) -> \(inputType.displayName)")
+        }
+
+        // Volume subscription push
+        if let volume = payload["volume"] as? Int {
+            let isMuted = payload["muted"] as? Bool ?? false
+            volumeChangeCallback?(volume, isMuted)
+            logger.debug("Volume push: \(volume), muted: \(isMuted)")
+        } else if let volumeStatus = payload["volumeStatus"] as? [String: Any],
+                  let volume = volumeStatus["volume"] as? Int {
+            let isMuted = volumeStatus["muteStatus"] as? Bool ?? volumeStatus["muted"] as? Bool ?? false
+            volumeChangeCallback?(volume, isMuted)
+            logger.debug("Volume push from volumeStatus: \(volume), muted: \(isMuted)")
+        }
+        
+        // Check for sound output in any push message (may come from sound output subscription)
+        if let soundOutputStr = extractSoundOutput(from: payload) {
+            let soundOutput = TVSoundOutput.fromAPIValue(soundOutputStr)
+            soundOutputChangeCallback?(soundOutput)
+            logger.debug("Sound output push: \(soundOutput.displayName)")
         }
     }
     
@@ -562,7 +637,7 @@ final class WebOSClient: WebOSClientProtocol {
         capabilityCallback?(capabilities)
         
         // Extract current input from foreground app info
-        if let appId = payload["appId"] as? String {
+        if let appId = extractAppId(from: payload) {
             if let inputType = mapAppIdToInputType(appId) {
                 inputChangeCallback?(inputType)
                 logger.debug("Foreground app input: \(appId) -> \(inputType.displayName)")
@@ -573,9 +648,92 @@ final class WebOSClient: WebOSClientProtocol {
     /// Handle input change
     private func handleInputChange(_ payload: [String: Any]) async {
         // Extract input type from payload
-        if let inputSource = payload["inputSource"] as? String {
+        if let inputSource = extractInputSource(from: payload) {
             let inputType = mapInputSourceToType(inputSource)
             inputChangeCallback?(inputType)
+        }
+    }
+
+    private func extractAppId(from payload: [String: Any]) -> String? {
+        if let appId = payload["appId"] as? String {
+            return appId
+        }
+
+        if let foregroundInfo = payload["foregroundAppInfo"] as? [String: Any],
+           let appId = foregroundInfo["appId"] as? String {
+            return appId
+        }
+
+        if let foregroundInfo = payload["foregroundAppInfo"] as? [[String: Any]],
+           let appId = foregroundInfo.first?["appId"] as? String {
+            return appId
+        }
+
+        return nil
+    }
+
+    private func extractInputSource(from payload: [String: Any]) -> String? {
+        if let inputSource = payload["inputSource"] as? String {
+            return inputSource
+        }
+
+        if let inputId = payload["inputId"] as? String {
+            return inputId
+        }
+
+        if let input = payload["input"] as? [String: Any] {
+            if let inputSource = input["inputSource"] as? String {
+                return inputSource
+            }
+            if let inputId = input["inputId"] as? String {
+                return inputId
+            }
+        }
+
+        return nil
+    }
+
+    private func extractSoundOutput(from payload: [String: Any]) -> String? {
+        if let soundOutput = payload["soundOutput"] as? String {
+            return soundOutput
+        }
+
+        if let output = payload["output"] as? String {
+            return output
+        }
+
+        if let soundOutput = payload["soundOutput"] as? [String: Any] {
+            if let nestedOutput = soundOutput["soundOutput"] as? String {
+                return nestedOutput
+            }
+            if let nestedOutput = soundOutput["output"] as? String {
+                return nestedOutput
+            }
+        }
+
+        if let volumeStatus = payload["volumeStatus"] as? [String: Any],
+           let soundOutput = volumeStatus["soundOutput"] as? String {
+            return soundOutput
+        }
+
+        if let status = payload["status"] as? [String: Any],
+           let soundOutput = status["soundOutput"] as? String {
+            return soundOutput
+        }
+
+        return nil
+    }
+
+    private func diagnosticPayloadJSON(from payload: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            return String(describing: payload)
+        }
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            return String(data: data, encoding: .utf8) ?? String(describing: payload)
+        } catch {
+            return String(describing: payload)
         }
     }
     
@@ -685,6 +843,14 @@ final class WebOSClient: WebOSClientProtocol {
         case .setDeviceInfo(let inputId, let icon, let label):
             message["uri"] = "ssap://com.webos.service.eim/setDeviceInfo"
             message["payload"] = ["id": inputId, "icon": "\(icon).png", "label": label]
+        case .getSoundOutput:
+            message["uri"] = "ssap://com.webos.service.apiadapter/audio/getSoundOutput"
+        case .subscribeSoundOutput:
+            message["type"] = "subscribe"
+            message["uri"] = "ssap://com.webos.service.apiadapter/audio/getSoundOutput"
+        case .setSoundOutput(let output):
+            message["uri"] = "ssap://com.webos.service.apiadapter/audio/changeSoundOutput"
+            message["payload"] = ["output": output]
         }
         
         return message
