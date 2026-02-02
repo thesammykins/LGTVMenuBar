@@ -1,5 +1,5 @@
 <h1>
-  <img src="images/menubar-small.png" alt="LGTVMenuBar icon" width="24" height="24" /> LGTVMenuBar
+  <img src="icons/app_icon-macOS-Default-1024x1024@2x.png" alt="LGTVMenuBar icon" width="32" height="32" /> LGTVMenuBar
 </h1>
 
 A native macOS menu bar app for controlling LG WebOS TVs.
