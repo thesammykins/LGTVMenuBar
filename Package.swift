@@ -15,12 +15,18 @@ let package = Package(
             name: "LGTVMenuBar",
             path: "Sources/LGTVMenuBar",
             exclude: ["Info.plist", "LGTVMenuBar.entitlements"],
-            resources: [.copy("Resources")]
+            resources: [.copy("Resources")],
+            swiftSettings: [
+                .define("LOCAL_ARYLIC_BUILD")
+            ]
         ),
         .testTarget(
             name: "LGTVMenuBarTests",
             dependencies: ["LGTVMenuBar"],
-            path: "Tests/LGTVMenuBarTests"
+            path: "Tests/LGTVMenuBarTests",
+            swiftSettings: [
+                .define("LOCAL_ARYLIC_BUILD")
+            ]
         )
     ]
 )

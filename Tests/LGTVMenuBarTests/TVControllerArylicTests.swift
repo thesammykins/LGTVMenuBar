@@ -63,9 +63,13 @@ struct TVControllerArylicTests {
         // Call volumeUp
         try await controller.volumeUp()
         
-        // Verify Arylic client was called
-        #expect(mockArylic.recordedCalls.count == 1)
+        // Wait for refreshArylicStatus to complete
+        try? await Task.sleep(for: .milliseconds(10))
+        
+        // Verify Arylic client was called: volumeUp + getPlayerStatus (refresh)
+        #expect(mockArylic.recordedCalls.count == 2)
         #expect(mockArylic.recordedCalls[0].method == .volumeUp)
+        #expect(mockArylic.recordedCalls[1].method == .getPlayerStatus)
     }
     
     @Test("volumeDown routes to Arylic when all conditions are met")
@@ -86,8 +90,13 @@ struct TVControllerArylicTests {
         
         try await controller.volumeDown()
         
-        #expect(mockArylic.recordedCalls.count == 1)
+        // Wait for refreshArylicStatus to complete
+        try? await Task.sleep(for: .milliseconds(10))
+        
+        // Verify Arylic client was called: volumeDown + getPlayerStatus (refresh)
+        #expect(mockArylic.recordedCalls.count == 2)
         #expect(mockArylic.recordedCalls[0].method == .volumeDown)
+        #expect(mockArylic.recordedCalls[1].method == .getPlayerStatus)
     }
     
     @Test("setVolume routes to Arylic when all conditions are met")

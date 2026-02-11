@@ -26,6 +26,13 @@ struct InlineSettingsView: View {
                 .tabItem {
                     Label("Diagnostics", systemImage: "bandage")
                 }
+            
+            #if LOCAL_ARYLIC_BUILD
+            ArylicTab(controller: controller)
+                .tabItem {
+                    Label("Arylic", systemImage: "hifispeaker")
+                }
+            #endif
         }
         .frame(maxHeight: 500)
     }
@@ -365,6 +372,14 @@ struct GeneralTab: View {
                     }
                     .font(.caption)
                 }
+                
+                #if LOCAL_ARYLIC_BUILD
+                Toggle("Route volume to Arylic device", isOn: Binding(
+                    get: { controller.isArylicVolumeControlEnabled },
+                    set: { controller.isArylicVolumeControlEnabled = $0 }
+                ))
+                .help("When enabled, volume keys control an Arylic device instead of the TV")
+                #endif
             } header: {
                 Text("Volume Control")
             }
@@ -680,3 +695,172 @@ struct DiagnosticsTab: View {
         }
     }
 }
+
+// MARK: - Arylic Tab
+
+#if LOCAL_ARYLIC_BUILD
+struct ArylicTab: View {
+    @Bindable var controller: TVController
+    
+    @State private var host: String = ""
+    @State private var port: String = "8899"
+    @State private var timeout: String = "5.0"
+    @State private var showingSaveConfirmation = false
+    @State private var testResult: String?
+    @State private var testError: String?
+    @State private var isTesting = false
+    
+    private var isPortValid: Bool {
+        guard let portInt = Int(port), (1...65535).contains(portInt) else { return false }
+        return true
+    }
+    
+    private var isTimeoutValid: Bool {
+        guard let t = Double(timeout), t > 0 else { return false }
+        return true
+    }
+    
+    var body: some View {
+        Form {
+            Section {
+                TextField("Host/IP Address", text: $host)
+                    .textFieldStyle(.roundedBorder)
+                    .help("e.g., 192.168.1.50 or arylic.local")
+                
+                TextField("Port", text: $port)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Default: 8899")
+                
+                if !port.isEmpty && !isPortValid {
+                    Text("Port must be 1–65535")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                
+                TextField("Timeout (seconds)", text: $timeout)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Default: 5.0")
+            } header: {
+                Text("Device Connection")
+            }
+            
+            Section {
+                HStack {
+                    Text("Current Target:")
+                    Spacer()
+                    Text(controller.volumeControlTarget == .arylic ? "Arylic" : "TV")
+                        .foregroundStyle(.secondary)
+                }
+                
+                HStack {
+                    Text("Settings Saved:")
+                    Spacer()
+                    Text(controller.arylicSettings != nil ? "Yes" : "No")
+                        .foregroundStyle(.secondary)
+                }
+                
+                if let result = testResult {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text(result)
+                            .foregroundStyle(.green)
+                    }
+                }
+                
+                if let error = testError {
+                    HStack {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .foregroundStyle(.red)
+                    }
+                }
+            } header: {
+                Text("Status")
+            }
+            
+            Section {
+                Button {
+                    testConnection()
+                } label: {
+                    if isTesting {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Testing…")
+                        }
+                    } else {
+                        Text("Test Connection")
+                    }
+                }
+                .disabled(host.isEmpty || !isPortValid || !isTimeoutValid || isTesting)
+                
+                Button("Save Settings") {
+                    saveSettings()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(host.isEmpty || !isPortValid || !isTimeoutValid)
+            } header: {
+                Text("Actions")
+            }
+        }
+        .formStyle(.columns)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .onAppear {
+            loadSettings()
+        }
+        .alert("Settings Saved", isPresented: $showingSaveConfirmation) {
+            Button("OK", role: .cancel) { }
+        }
+    }
+    
+    private func loadSettings() {
+        if let settings = controller.arylicSettings {
+            host = settings.host
+            port = String(settings.port)
+            timeout = String(settings.timeout)
+        }
+    }
+    
+    private func saveSettings() {
+        guard let portInt = Int(port),
+              let timeoutDouble = Double(timeout) else {
+            return
+        }
+        
+        let settings = ArylicSettings(
+            host: host,
+            port: portInt,
+            timeout: timeoutDouble
+        )
+        
+        controller.arylicSettings = settings
+        showingSaveConfirmation = true
+    }
+    
+    private func testConnection() {
+        guard let portInt = Int(port),
+              let timeoutDouble = Double(timeout) else { return }
+        
+        isTesting = true
+        testResult = nil
+        testError = nil
+        
+        Task {
+            do {
+                let settings = ArylicSettings(host: host, port: portInt, timeout: timeoutDouble)
+                let client = ArylicVolumeClient(settings: settings)
+                let status = try await client.getPlayerStatus()
+                testResult = "Connected — Volume: \(status.volume), Muted: \(status.isMuted)"
+                testError = nil
+            } catch {
+                testError = error.localizedDescription
+                testResult = nil
+            }
+            isTesting = false
+        }
+    }
+}
+#endif
