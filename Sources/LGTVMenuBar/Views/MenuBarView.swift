@@ -219,6 +219,79 @@ private struct QuickActionsSection: View {
                 .menuStyle(.borderlessButton)
                 
                 // Sound output picker (only show when Mac audio goes to TV)
+                #if LOCAL_ARYLIC_BUILD
+                if audioOutputType == .hdmi || controller.volumeControlTarget == .arylic {
+                    Menu {
+                        Button("TV Speaker") {
+                            Task {
+                                try? await controller.setSoundOutput(.tvSpeaker)
+                                #if LOCAL_ARYLIC_BUILD
+                                controller.volumeControlTarget = .tv
+                                #endif
+                            }
+                        }
+                        Button("HDMI ARC") {
+                            Task {
+                                try? await controller.setSoundOutput(.externalArc)
+                                #if LOCAL_ARYLIC_BUILD
+                                controller.volumeControlTarget = .tv
+                                #endif
+                            }
+                        }
+                        Button("Optical") {
+                            Task {
+                                try? await controller.setSoundOutput(.externalOptical)
+                                #if LOCAL_ARYLIC_BUILD
+                                controller.volumeControlTarget = .tv
+                                #endif
+                            }
+                        }
+                        Button("Headphone") {
+                            Task {
+                                try? await controller.setSoundOutput(.headphone)
+                                #if LOCAL_ARYLIC_BUILD
+                                controller.volumeControlTarget = .tv
+                                #endif
+                            }
+                        }
+                        #if LOCAL_ARYLIC_BUILD
+                        if controller.isArylicVolumeControlEnabled {
+                            Divider()
+                            Button {
+                                controller.volumeControlTarget = .arylic
+                            } label: {
+                                HStack {
+                                    Text("Arylic")
+                                    if controller.volumeControlTarget == .arylic {
+                                        Spacer()
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                        #endif
+                    } label: {
+                        HStack {
+                            Image(systemName: "speaker.wave.2")
+                            #if LOCAL_ARYLIC_BUILD
+                            Text(controller.volumeControlTarget == .arylic ? "Arylic" : controller.soundOutput.displayName)
+                            #else
+                            Text(controller.soundOutput.displayName)
+                            #endif
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(.quaternary)
+                        .cornerRadius(6)
+                    }
+                    .menuStyle(.borderlessButton)
+                }
+                #else
                 if audioOutputType == .hdmi {
                     Menu {
                         Button("TV Speaker") {
@@ -250,6 +323,7 @@ private struct QuickActionsSection: View {
                     }
                     .menuStyle(.borderlessButton)
                 }
+                #endif
             }
         }
     }

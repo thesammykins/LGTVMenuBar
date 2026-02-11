@@ -26,6 +26,13 @@ struct InlineSettingsView: View {
                 .tabItem {
                     Label("Diagnostics", systemImage: "bandage")
                 }
+            
+            #if LOCAL_ARYLIC_BUILD
+            ArylicTab(controller: controller)
+                .tabItem {
+                    Label("Arylic", systemImage: "hifispeaker")
+                }
+            #endif
         }
         .frame(maxHeight: 500)
     }
@@ -365,6 +372,14 @@ struct GeneralTab: View {
                     }
                     .font(.caption)
                 }
+                
+                #if LOCAL_ARYLIC_BUILD
+                Toggle("Route volume to Arylic device", isOn: Binding(
+                    get: { controller.isArylicVolumeControlEnabled },
+                    set: { controller.isArylicVolumeControlEnabled = $0 }
+                ))
+                .help("When enabled, volume keys control an Arylic device instead of the TV")
+                #endif
             } header: {
                 Text("Volume Control")
             }
@@ -680,3 +695,104 @@ struct DiagnosticsTab: View {
         }
     }
 }
+
+// MARK: - Arylic Tab
+
+#if LOCAL_ARYLIC_BUILD
+struct ArylicTab: View {
+    @Bindable var controller: TVController
+    
+    @State private var host: String = ""
+    @State private var port: String = "80"
+    @State private var timeout: String = "5.0"
+    @State private var showingSaveConfirmation = false
+    
+    var body: some View {
+        Form {
+            Section {
+                TextField("Host/IP Address", text: $host)
+                    .textFieldStyle(.roundedBorder)
+                    .help("e.g., 192.168.1.50 or arylic.local")
+                
+                TextField("Port", text: $port)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Default: 80")
+                
+                TextField("Timeout (seconds)", text: $timeout)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Default: 5.0")
+            } header: {
+                Text("Device Connection")
+            }
+            
+            Section {
+                HStack {
+                    Text("Current Target:")
+                    Spacer()
+                    Text(controller.volumeControlTarget == .arylic ? "Arylic" : "TV")
+                        .foregroundStyle(.secondary)
+                }
+                
+                HStack {
+                    Text("Settings Saved:")
+                    Spacer()
+                    Text(controller.arylicSettings != nil ? "Yes" : "No")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Status")
+            }
+            
+            Section {
+                Button("Test Connection") {
+                    Task {
+                        await controller.refreshArylicStatus()
+                    }
+                }
+                .disabled(host.isEmpty)
+                
+                Button("Save Settings") {
+                    saveSettings()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(host.isEmpty || port.isEmpty || timeout.isEmpty)
+            } header: {
+                Text("Actions")
+            }
+        }
+        .formStyle(.columns)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .onAppear {
+            loadSettings()
+        }
+        .alert("Settings Saved", isPresented: $showingSaveConfirmation) {
+            Button("OK", role: .cancel) { }
+        }
+    }
+    
+    private func loadSettings() {
+        if let settings = controller.arylicSettings {
+            host = settings.host
+            port = String(settings.port)
+            timeout = String(settings.timeout)
+        }
+    }
+    
+    private func saveSettings() {
+        guard let portInt = Int(port),
+              let timeoutDouble = Double(timeout) else {
+            return
+        }
+        
+        let settings = ArylicSettings(
+            host: host,
+            port: portInt,
+            timeout: timeoutDouble
+        )
+        
+        controller.arylicSettings = settings
+        showingSaveConfirmation = true
+    }
+}
+#endif
