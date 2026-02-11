@@ -19,10 +19,19 @@ public struct MenuBarView: View {
             
             Divider()
             
-            // Only show controls if connected
+            // Show controls if connected to TV, or if Arylic volume is targeted
+            #if LOCAL_ARYLIC_BUILD
+            let arylicOnly = !controller.connectionState.isConnected &&
+                controller.isArylicVolumeControlEnabled && controller.volumeControlTarget == .arylic
+            #else
+            let arylicOnly = false
+            #endif
             if controller.connectionState.isConnected {
                 QuickActionsSection(controller: controller, audioOutputType: audioOutputType)
                 Divider()
+                VolumeSection(controller: controller)
+                Divider()
+            } else if arylicOnly {
                 VolumeSection(controller: controller)
                 Divider()
             } else if controller.configuration != nil {

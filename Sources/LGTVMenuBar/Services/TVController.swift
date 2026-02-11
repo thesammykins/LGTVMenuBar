@@ -318,6 +318,7 @@ public final class TVController: TVControllerProtocol {
             }
             do {
                 try await client.volumeUp()
+                await refreshArylicStatus()
                 logger.info("Arylic volume increased")
             } catch {
                 logger.error("Failed to increase Arylic volume: \(error.localizedDescription)")
@@ -340,6 +341,7 @@ public final class TVController: TVControllerProtocol {
             }
             do {
                 try await client.volumeDown()
+                await refreshArylicStatus()
                 logger.info("Arylic volume decreased")
             } catch {
                 logger.error("Failed to decrease Arylic volume: \(error.localizedDescription)")
@@ -801,7 +803,12 @@ public final class TVController: TVControllerProtocol {
     }
     
     private func handleMediaKey(_ key: MediaKey) async {
-        guard connectionState.isConnected else { return }
+        #if LOCAL_ARYLIC_BUILD
+        let arylicTargeted = isArylicVolumeControlEnabled && volumeControlTarget == .arylic
+        #else
+        let arylicTargeted = false
+        #endif
+        guard connectionState.isConnected || arylicTargeted else { return }
         
         do {
             switch key {

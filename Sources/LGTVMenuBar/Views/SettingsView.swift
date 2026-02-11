@@ -703,9 +703,22 @@ struct ArylicTab: View {
     @Bindable var controller: TVController
     
     @State private var host: String = ""
-    @State private var port: String = "80"
+    @State private var port: String = "8899"
     @State private var timeout: String = "5.0"
     @State private var showingSaveConfirmation = false
+    @State private var testResult: String?
+    @State private var testError: String?
+    @State private var isTesting = false
+    
+    private var isPortValid: Bool {
+        guard let portInt = Int(port), (1...65535).contains(portInt) else { return false }
+        return true
+    }
+    
+    private var isTimeoutValid: Bool {
+        guard let t = Double(timeout), t > 0 else { return false }
+        return true
+    }
     
     var body: some View {
         Form {
@@ -716,7 +729,13 @@ struct ArylicTab: View {
                 
                 TextField("Port", text: $port)
                     .textFieldStyle(.roundedBorder)
-                    .help("Default: 80")
+                    .help("Default: 8899")
+                
+                if !port.isEmpty && !isPortValid {
+                    Text("Port must be 1–65535")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
                 
                 TextField("Timeout (seconds)", text: $timeout)
                     .textFieldStyle(.roundedBorder)
@@ -739,23 +758,49 @@ struct ArylicTab: View {
                     Text(controller.arylicSettings != nil ? "Yes" : "No")
                         .foregroundStyle(.secondary)
                 }
+                
+                if let result = testResult {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text(result)
+                            .foregroundStyle(.green)
+                    }
+                }
+                
+                if let error = testError {
+                    HStack {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .foregroundStyle(.red)
+                    }
+                }
             } header: {
                 Text("Status")
             }
             
             Section {
-                Button("Test Connection") {
-                    Task {
-                        await controller.refreshArylicStatus()
+                Button {
+                    testConnection()
+                } label: {
+                    if isTesting {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Testing…")
+                        }
+                    } else {
+                        Text("Test Connection")
                     }
                 }
-                .disabled(host.isEmpty)
+                .disabled(host.isEmpty || !isPortValid || !isTimeoutValid || isTesting)
                 
                 Button("Save Settings") {
                     saveSettings()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(host.isEmpty || port.isEmpty || timeout.isEmpty)
+                .disabled(host.isEmpty || !isPortValid || !isTimeoutValid)
             } header: {
                 Text("Actions")
             }
@@ -793,6 +838,29 @@ struct ArylicTab: View {
         
         controller.arylicSettings = settings
         showingSaveConfirmation = true
+    }
+    
+    private func testConnection() {
+        guard let portInt = Int(port),
+              let timeoutDouble = Double(timeout) else { return }
+        
+        isTesting = true
+        testResult = nil
+        testError = nil
+        
+        Task {
+            do {
+                let settings = ArylicSettings(host: host, port: portInt, timeout: timeoutDouble)
+                let client = ArylicVolumeClient(settings: settings)
+                let status = try await client.getPlayerStatus()
+                testResult = "Connected — Volume: \(status.volume), Muted: \(status.isMuted)"
+                testError = nil
+            } catch {
+                testError = error.localizedDescription
+                testResult = nil
+            }
+            isTesting = false
+        }
     }
 }
 #endif

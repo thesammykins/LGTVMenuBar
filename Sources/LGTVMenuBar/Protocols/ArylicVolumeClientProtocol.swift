@@ -2,7 +2,7 @@ import Foundation
 
 /// Protocol for interacting with Arylic audio device volume control API.
 ///
-/// Arylic devices expose an HTTP API at `http://{host}:{port}/httpapi.asp?command={cmd}`
+/// Arylic devices expose a TCP API at `{host}:{port}` using the Arylic binary TCP protocol
 /// for controlling playback and volume.
 public protocol ArylicVolumeClientProtocol: Sendable {
     /// Retrieves the current player status including volume and mute state.
