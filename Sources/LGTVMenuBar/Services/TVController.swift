@@ -48,6 +48,56 @@ public final class TVController: TVControllerProtocol {
         }
     }
     
+    #if LOCAL_ARYLIC_BUILD
+    /// Whether Arylic volume control is enabled (persisted to UserDefaults)
+    public var isArylicVolumeControlEnabled: Bool = false {
+        didSet {
+            UserDefaults.standard.set(isArylicVolumeControlEnabled, forKey: arylicVolumeControlEnabledKey)
+            logger.info("Arylic volume control \(self.isArylicVolumeControlEnabled ? "enabled" : "disabled")")
+            logDiagnostic(level: "info", category: "TVController", message: "Arylic volume control \(self.isArylicVolumeControlEnabled ? "enabled" : "disabled")")
+        }
+    }
+    
+    /// Volume control target (TV or Arylic) (persisted to UserDefaults)
+    public var volumeControlTarget: VolumeControlTarget = .tv {
+        didSet {
+            UserDefaults.standard.set(volumeControlTarget.rawValue, forKey: volumeControlTargetKey)
+            logger.info("Volume control target changed to \(self.volumeControlTarget.rawValue)")
+            logDiagnostic(level: "info", category: "TVController", message: "Volume control target changed", metadata: ["target": volumeControlTarget.rawValue])
+            
+            // Refresh Arylic status when switching to Arylic target
+            if volumeControlTarget == .arylic && isArylicVolumeControlEnabled {
+                Task {
+                    await refreshArylicStatus()
+                }
+            }
+        }
+    }
+    
+    /// Arylic device settings (persisted to UserDefaults)
+    public var arylicSettings: ArylicSettings? {
+        didSet {
+            if let settings = arylicSettings {
+                if let data = try? JSONEncoder().encode(settings) {
+                    UserDefaults.standard.set(data, forKey: arylicSettingsKey)
+                }
+                // Recreate client with new settings
+                arylicClient = ArylicVolumeClient(settings: settings)
+                logger.info("Arylic settings updated: \(settings.host):\(settings.port)")
+                logDiagnostic(level: "info", category: "TVController", message: "Arylic settings updated", metadata: ["host": settings.host, "port": "\(settings.port)"])
+            } else {
+                UserDefaults.standard.removeObject(forKey: arylicSettingsKey)
+                arylicClient = nil
+                logger.info("Arylic settings cleared")
+                logDiagnostic(level: "info", category: "TVController", message: "Arylic settings cleared")
+            }
+        }
+    }
+    
+    /// Arylic client (lazily created when settings are configured)
+    private var arylicClient: ArylicVolumeClientProtocol?
+    #endif
+    
     // MARK: - Services
     
     private let webOSClient: WebOSClientProtocol
@@ -61,6 +111,11 @@ public final class TVController: TVControllerProtocol {
     
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "TVController")
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"
+    #if LOCAL_ARYLIC_BUILD
+    private let arylicVolumeControlEnabledKey = "arylicVolumeControlEnabled"
+    private let volumeControlTargetKey = "volumeControlTarget"
+    private let arylicSettingsKey = "arylicSettings"
+    #endif
     private let configurationKey = "tv_configuration"
     private var diagnosticCaptureUntil: Date?
     private var diagnosticCaptureRestoreState: (enabled: Bool, debug: Bool)?
@@ -97,7 +152,37 @@ public final class TVController: TVControllerProtocol {
         
         setupCallbacks()
         loadConfiguration()
+        #if LOCAL_ARYLIC_BUILD
+        loadArylicConfiguration()
+        #endif
     }
+    
+    #if LOCAL_ARYLIC_BUILD
+    /// Internal initializer for testing with injectable Arylic client
+    internal init(
+        webOSClient: WebOSClientProtocol,
+        wolService: WOLServiceProtocol,
+        powerManager: PowerManagerProtocol,
+        keychainManager: KeychainManagerProtocol,
+        mediaKeyManager: MediaKeyManagerProtocol,
+        launchAtLoginManager: LaunchAtLoginManagerProtocol,
+        diagnosticLogger: DiagnosticLoggerProtocol,
+        arylicClient: ArylicVolumeClientProtocol?
+    ) {
+        self.webOSClient = webOSClient
+        self.wolService = wolService
+        self.powerManager = powerManager
+        self.keychainManager = keychainManager
+        self.mediaKeyManager = mediaKeyManager
+        self.launchAtLoginManager = launchAtLoginManager
+        self.diagnosticLogger = diagnosticLogger
+        self.arylicClient = arylicClient
+        
+        setupCallbacks()
+        loadConfiguration()
+        loadArylicConfiguration()
+    }
+    #endif
     
     /// Convenience initializer with default implementations
     public convenience init() {
@@ -154,6 +239,13 @@ public final class TVController: TVControllerProtocol {
         }
 
         await requestDeviceDetailsCommands()
+        
+        #if LOCAL_ARYLIC_BUILD
+        // Refresh Arylic status if target is Arylic
+        if volumeControlTarget == .arylic && isArylicVolumeControlEnabled {
+            await refreshArylicStatus()
+        }
+        #endif
     }
     
     /// Disconnect from the TV
@@ -218,23 +310,94 @@ public final class TVController: TVControllerProtocol {
     
     /// Increase volume
     public func volumeUp() async throws {
+        #if LOCAL_ARYLIC_BUILD
+        if isArylicVolumeControlEnabled && volumeControlTarget == .arylic {
+            guard let client = arylicClient else {
+                logger.error("Arylic client not configured")
+                throw LGTVError.tvNotFound
+            }
+            do {
+                try await client.volumeUp()
+                logger.info("Arylic volume increased")
+            } catch {
+                logger.error("Failed to increase Arylic volume: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to increase Arylic volume", metadata: ["error": error.localizedDescription])
+                throw error
+            }
+            return
+        }
+        #endif
         try await webOSClient.sendCommand(.volumeUp)
     }
     
     /// Decrease volume
     public func volumeDown() async throws {
+        #if LOCAL_ARYLIC_BUILD
+        if isArylicVolumeControlEnabled && volumeControlTarget == .arylic {
+            guard let client = arylicClient else {
+                logger.error("Arylic client not configured")
+                throw LGTVError.tvNotFound
+            }
+            do {
+                try await client.volumeDown()
+                logger.info("Arylic volume decreased")
+            } catch {
+                logger.error("Failed to decrease Arylic volume: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to decrease Arylic volume", metadata: ["error": error.localizedDescription])
+                throw error
+            }
+            return
+        }
+        #endif
         try await webOSClient.sendCommand(.volumeDown)
     }
     
     /// Set specific volume level
     public func setVolume(_ level: Int) async throws {
         let clampedLevel = max(0, min(100, level))
+        #if LOCAL_ARYLIC_BUILD
+        if isArylicVolumeControlEnabled && volumeControlTarget == .arylic {
+            guard let client = arylicClient else {
+                logger.error("Arylic client not configured")
+                throw LGTVError.tvNotFound
+            }
+            do {
+                try await client.setVolume(clampedLevel)
+                self.volume = clampedLevel
+                logger.info("Arylic volume set to \(clampedLevel)")
+            } catch {
+                logger.error("Failed to set Arylic volume: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to set Arylic volume", metadata: ["error": error.localizedDescription])
+                throw error
+            }
+            return
+        }
+        #endif
         try await webOSClient.sendCommand(.setVolume(clampedLevel))
         self.volume = clampedLevel
     }
     
     /// Toggle mute
     public func toggleMute() async throws {
+        #if LOCAL_ARYLIC_BUILD
+        if isArylicVolumeControlEnabled && volumeControlTarget == .arylic {
+            guard let client = arylicClient else {
+                logger.error("Arylic client not configured")
+                throw LGTVError.tvNotFound
+            }
+            let newMuteState = !isMuted
+            do {
+                try await client.setMute(newMuteState)
+                isMuted = newMuteState
+                logger.info("Arylic mute toggled to \(newMuteState)")
+            } catch {
+                logger.error("Failed to toggle Arylic mute: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to toggle Arylic mute", metadata: ["error": error.localizedDescription])
+                throw error
+            }
+            return
+        }
+        #endif
         if isMuted {
             try await webOSClient.sendCommand(.unmute)
         } else {
@@ -242,6 +405,28 @@ public final class TVController: TVControllerProtocol {
         }
         isMuted.toggle()
     }
+    
+    #if LOCAL_ARYLIC_BUILD
+    /// Refresh volume and mute state from Arylic device
+    public func refreshArylicStatus() async {
+        guard isArylicVolumeControlEnabled,
+              volumeControlTarget == .arylic,
+              let client = arylicClient else {
+            return
+        }
+        
+        do {
+            let status = try await client.getPlayerStatus()
+            self.volume = status.volume
+            self.isMuted = status.isMuted
+            logger.info("Refreshed Arylic status: volume=\(status.volume), muted=\(status.isMuted)")
+            logDiagnostic(level: "info", category: "TVController", message: "Refreshed Arylic status", metadata: ["volume": "\(status.volume)", "isMuted": "\(status.isMuted)"])
+        } catch {
+            logger.error("Failed to refresh Arylic status: \(error.localizedDescription)")
+            logDiagnostic(level: "error", category: "TVController", message: "Failed to refresh Arylic status", metadata: ["error": error.localizedDescription])
+        }
+    }
+    #endif
     
     // MARK: - Input Control
     
@@ -470,6 +655,31 @@ public final class TVController: TVControllerProtocol {
             configuration = nil
         }
     }
+    
+    #if LOCAL_ARYLIC_BUILD
+    private func loadArylicConfiguration() {
+        // Load Arylic volume control enabled flag
+        isArylicVolumeControlEnabled = UserDefaults.standard.bool(forKey: arylicVolumeControlEnabledKey)
+        
+        // Load volume control target
+        if let targetString = UserDefaults.standard.string(forKey: volumeControlTargetKey),
+           let target = VolumeControlTarget(rawValue: targetString) {
+            volumeControlTarget = target
+        }
+        
+        // Load Arylic settings
+        if let data = UserDefaults.standard.data(forKey: arylicSettingsKey) {
+            do {
+                let settings = try JSONDecoder().decode(ArylicSettings.self, from: data)
+                arylicSettings = settings
+                arylicClient = ArylicVolumeClient(settings: settings)
+                logger.info("Loaded Arylic settings: \(settings.host):\(settings.port)")
+            } catch {
+                logger.error("Failed to decode Arylic settings: \(error.localizedDescription)")
+            }
+        }
+    }
+    #endif
     
     private func handleMacWake() async {
         guard let config = configuration, config.wakeWithMac else { return }
