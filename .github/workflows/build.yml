@@ -43,7 +43,6 @@ jobs:
           ASC_CERTIFICATE: ${{ secrets.ASC_CERTIFICATE }}
           ASC_CERTIFICATE_PASSWORD: ${{ secrets.ASC_CERTIFICATE_PASSWORD }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-          DEVELOPER_ID_IDENTITY: Developer ID Application: Samantha Myers (7GF6N5U8ZH)
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
@@ -80,7 +79,17 @@ jobs:
 
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$ASC_CERTIFICATE_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" "$DEFAULT_KEYCHAIN"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F "$DEVELOPER_ID_IDENTITY" >/dev/null
+
+          IDENTITY_LINE=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F 'Developer ID Application:' | head -n 1)
+          if [ -z "$IDENTITY_LINE" ]; then
+            echo "::error::No Developer ID Application identity found after import"
+            exit 1
+          fi
+
+          DEVELOPER_ID_IDENTITY=$(awk '{print $2}' <<< "$IDENTITY_LINE")
+          DEVELOPER_ID_IDENTITY_NAME=$(awk -F '"' '{print $2}' <<< "$IDENTITY_LINE")
+          export DEVELOPER_ID_IDENTITY
+          export DEVELOPER_ID_IDENTITY_NAME
 
           printf '%s' "$ASC_PRIVATE_KEY" > "$ASC_KEY_FILE"
           chmod 600 "$ASC_KEY_FILE"
