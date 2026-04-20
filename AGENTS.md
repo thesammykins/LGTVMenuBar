@@ -48,6 +48,7 @@ Operational notes:
 - `--release` requires a local `Developer ID Application` certificate plus notary credentials via `ASC_KEY_FILE`/`ASC_KEY_ID`/`ASC_ISSUER_ID` or a configured `ASC_1PASSWORD_ITEM`.
 - GitHub Actions release validation expects `ASC_CERTIFICATE`, `ASC_CERTIFICATE_PASSWORD`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`, and `ASC_ISSUER_ID` repo secrets.
 - When duplicate `Developer ID Application` subject names exist in Keychain after certificate rotation, resolve the certificate by SHA-1 identity hash before calling `codesign`; subject-name signing becomes ambiguous.
+- `xcrun stapler validate` is the reliable local notarization check for this DMG flow; `spctl` can report `source=Insufficient Context` on a freshly stapled local DMG even when notarization succeeded.
 - Release artifacts are written to `release/`.
 
 ## Versioning & Release Process

@@ -271,7 +271,6 @@ notarize_dmg_release() {
 
     log_info "Validating stapled DMG..."
     xcrun stapler validate "${DMG_PATH}"
-    spctl -a -vv --type open "${DMG_PATH}"
 
     log_success "Notarization completed"
 }
