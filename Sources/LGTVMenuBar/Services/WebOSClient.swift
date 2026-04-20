@@ -44,7 +44,7 @@ final class WebOSClient: WebOSClientProtocol {
     private let sslURLSession: URLSession
     
     /// Keychain manager for storing client keys
-    private let keychainManager: KeychainManager
+    private let keychainManager: KeychainManagerProtocol
     
     /// Current connection state
     private var _connectionState = ConnectionState.disconnected
@@ -81,12 +81,21 @@ final class WebOSClient: WebOSClientProtocol {
     
     /// Pending requests awaiting responses
     private var pendingRequests: [String: CheckedContinuation<Any, Error>] = [:]
+
+    /// Continuation used while waiting for the TV to acknowledge registration.
+    private var handshakeContinuation: CheckedContinuation<Void, Error>?
     
     /// Whether the current connection uses SSL
     private var usesSSL: Bool = false
     
     /// Connection timeout in seconds
     private let connectionTimeout: TimeInterval = 10.0
+
+    /// Optional test hook for observing connection state changes without a real socket.
+    private var testStateChangeObserver: ((ConnectionState) -> Void)?
+
+    /// Optional test hook for intercepting command sends without a live socket.
+    private var testSendCommandHandler: ((WebOSCommand) async throws -> Void)?
     
     /// Current connection state
     var connectionState: ConnectionState {
@@ -94,7 +103,7 @@ final class WebOSClient: WebOSClientProtocol {
     }
     
     /// Initialize WebOSClient
-    init(keychainManager: KeychainManager = KeychainManager()) {
+    init(keychainManager: KeychainManagerProtocol = KeychainManager()) {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 30
@@ -110,6 +119,24 @@ final class WebOSClient: WebOSClientProtocol {
         self.keychainManager = keychainManager
         
         logger.info("WebOSClient initialized")
+    }
+
+    /// Test-only initializer hook for observing internal state changes.
+    internal func setTestStateChangeObserver(_ observer: @escaping (ConnectionState) -> Void) {
+        self.testStateChangeObserver = observer
+    }
+
+    internal func setTestSendCommandHandler(_ handler: @escaping (WebOSCommand) async throws -> Void) {
+        self.testSendCommandHandler = handler
+    }
+
+    internal func setConnectionStateForTesting(_ state: ConnectionState, handshakeCompleted: Bool) {
+        self._connectionState = state
+        self.handshakeCompleted = handshakeCompleted
+    }
+
+    internal func handleMessageForTesting(_ string: String) async {
+        await handleMessage(string)
     }
     
     deinit {
@@ -137,6 +164,7 @@ final class WebOSClient: WebOSClientProtocol {
             webSocketTask?.cancel()
             webSocketTask = nil
             handshakeCompleted = false
+            failHandshake(LGTVError.webosError("Connection reset"))
             // Fail any pending requests
             for (_, continuation) in pendingRequests {
                 continuation.resume(throwing: LGTVError.webosError("Connection reset"))
@@ -151,6 +179,7 @@ final class WebOSClient: WebOSClientProtocol {
         self._connectionState = .connecting
         
         stateChangeCallback(.connecting)
+        testStateChangeObserver?(.connecting)
         
         // Connection strategy: Try SSL first (required for 2022+ TVs), fallback to non-SSL
         var lastError: Error?
@@ -160,8 +189,6 @@ final class WebOSClient: WebOSClientProtocol {
             logger.debug("Attempting SSL connection on port 3001")
             try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: true)
             self.usesSSL = true
-            self._connectionState = .connected
-            stateChangeCallback(.connected)
             logger.info("\("Successfully connected via SSL", privacy: .public) to \(configuration.name)")
             return
         } catch {
@@ -170,6 +197,8 @@ final class WebOSClient: WebOSClientProtocol {
             // Clean up failed connection
             webSocketTask?.cancel()
             webSocketTask = nil
+            handshakeCompleted = false
+            failHandshake(error)
         }
         
         // Try non-SSL connection (ws:// on port 3000)
@@ -177,8 +206,6 @@ final class WebOSClient: WebOSClientProtocol {
             logger.debug("Attempting non-SSL connection on port 3000")
             try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: false)
             self.usesSSL = false
-            self._connectionState = .connected
-            stateChangeCallback(.connected)
             logger.info("\("Successfully connected via non-SSL", privacy: .public) to \(configuration.name)")
             return
         } catch {
@@ -214,13 +241,15 @@ final class WebOSClient: WebOSClientProtocol {
         Task {
             await handleMessages()
         }
+
+        _connectionState = .registering
+        stateChangeCallback?(.registering)
+        testStateChangeObserver?(.registering)
         
         // Perform handshake with timeout
         try await withTimeout(connectionTimeout) {
             try await self.performHandshake()
         }
-        
-        handshakeCompleted = true
     }
     
     /// Execute an async operation with a timeout
@@ -264,6 +293,8 @@ final class WebOSClient: WebOSClientProtocol {
         
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
+
+        failHandshake(LGTVError.webosError("Connection closed"))
         
         _connectionState = .disconnected
         handshakeCompleted = false
@@ -275,6 +306,7 @@ final class WebOSClient: WebOSClientProtocol {
         pendingRequests.removeAll()
         
         stateChangeCallback?(.disconnected)
+        testStateChangeObserver?(.disconnected)
         
         logger.info("\("Disconnected from TV", privacy: .public)")
     }
@@ -286,6 +318,15 @@ final class WebOSClient: WebOSClientProtocol {
         guard _connectionState == .connected, handshakeCompleted else {
             throw LGTVError.webosError("Not connected to TV")
         }
+
+        if let testSendCommandHandler {
+            do {
+                try await testSendCommandHandler(command)
+                return
+            } catch {
+                throw LGTVError.webosError("Failed to send command: \(error.localizedDescription)")
+            }
+        }
         
         logger.debug("Sending command: \(String(describing: command))")
         
@@ -293,10 +334,19 @@ final class WebOSClient: WebOSClientProtocol {
             let messageDict = try createCommandMessage(command)
             let data = try JSONSerialization.data(withJSONObject: messageDict)
             let string = String(data: data, encoding: .utf8)!
-            
-            webSocketTask?.send(.string(string)) { error in
-                if let error = error {
-                    self.logger.error("Failed to send command: \(error.localizedDescription, privacy: .public)")
+
+            guard let webSocketTask else {
+                throw LGTVError.webosError("WebSocket connection is unavailable")
+            }
+
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                webSocketTask.send(.string(string)) { error in
+                    if let error {
+                        self.logger.error("Failed to send command: \(error.localizedDescription, privacy: .public)")
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
             
@@ -412,31 +462,28 @@ final class WebOSClient: WebOSClientProtocol {
         let string = String(data: data, encoding: .utf8)!
         
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            webSocketTask?.send(.string(string)) { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+            self.handshakeContinuation = continuation
+
+            guard let webSocketTask else {
+                self.failHandshake(LGTVError.webosError("WebSocket connection is unavailable"))
+                return
+            }
+
+            webSocketTask.send(.string(string)) { [weak self] error in
+                guard let self, let error else { return }
+
+                Task { @MainActor in
+                    self.failHandshake(error)
                 }
             }
         }
         
-        // Wait for handshake response
-        try await waitForHandshakeResponse()
-        
         logger.debug("Handshake completed")
-    }
-    
-    /// Wait for handshake response
-    private func waitForHandshakeResponse() async throws {
-        // This would normally wait for a specific response message
-        // For now, we'll simulate a short delay
-        try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
     }
     
     /// Handle incoming WebSocket messages
     private func handleMessages() async {
-        while _connectionState == .connecting || _connectionState == .connected {
+        while _connectionState == .connecting || _connectionState == .registering || _connectionState == .connected {
             do {
                 let message = try await webSocketTask?.receive()
                 
@@ -455,10 +502,13 @@ final class WebOSClient: WebOSClientProtocol {
                 
             } catch {
                 logger.error("Error receiving message: \(error.localizedDescription, privacy: .public)")
+
+                failHandshake(error)
                 
                 if _connectionState != .disconnected {
                     _connectionState = .error(error)
                     stateChangeCallback?(.error(error))
+                    testStateChangeObserver?(.error(error))
                 }
                 break
             }
@@ -491,6 +541,16 @@ final class WebOSClient: WebOSClientProtocol {
     /// Handle registered message
     private func handleRegisteredMessage(_ messageDict: [String: Any]) async {
         logger.info("\("Successfully registered with TV", privacy: .public)")
+
+        handshakeCompleted = true
+        _connectionState = .connected
+        stateChangeCallback?(.connected)
+        testStateChangeObserver?(.connected)
+
+        if let handshakeContinuation {
+            self.handshakeContinuation = nil
+            handshakeContinuation.resume()
+        }
         
         // Extract and save client key if present
         if let payload = messageDict["payload"] as? [String: Any],
@@ -735,6 +795,12 @@ final class WebOSClient: WebOSClientProtocol {
         } catch {
             return String(describing: payload)
         }
+    }
+
+    private func failHandshake(_ error: Error) {
+        guard let handshakeContinuation else { return }
+        self.handshakeContinuation = nil
+        handshakeContinuation.resume(throwing: error)
     }
     
     /// Map input source string to TVInputType

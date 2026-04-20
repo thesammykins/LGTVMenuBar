@@ -40,9 +40,20 @@ swift build
 # Run tests
 swift test
 
-# Build release DMG
+# Build a development DMG (ad-hoc signed)
 ./scripts/build-dmg.sh
+
+# Build a local signed release without notarization
+./scripts/build-dmg.sh --local-release
+
+# Build a signed and notarized release
+./scripts/build-dmg.sh --release
 ```
+
+Notes:
+- `./scripts/build-dmg.sh` produces an ad-hoc signed development build.
+- `./scripts/build-dmg.sh --local-release` requires a local `Developer ID Application` certificate.
+- `./scripts/build-dmg.sh --release` requires a local `Developer ID Application` certificate plus App Store Connect notary credentials.
 
 ## Installation
 
@@ -52,21 +63,16 @@ swift test
 4. Follow the onboarding wizard to connect your TV
 5. Grant Accessibility permission when prompted (for media key capture)
 
-## First Launch (Security Warning)
+## First Launch And Security
 
-Since this app is distributed outside the Mac App Store and uses ad-hoc code signing, macOS Gatekeeper will block it on first launch with a message: **"LGTVMenuBar cannot be opened because the developer cannot be verified."**
+Official GitHub releases are `Developer ID` signed and notarized, so Gatekeeper should allow a normal first launch after you drag the app into `Applications`.
 
-To open the app:
+If you build the app locally with the default `./scripts/build-dmg.sh`, the output is only ad-hoc signed for development. That build is not notarized, and macOS may treat it differently from the official release artifacts.
 
-1. **Right-click** (or Control-click) on LGTVMenuBar in Applications
-2. Select **Open** from the context menu
-3. Click **Open** in the dialog that appears
+For local ad-hoc builds:
 
-You only need to do this once—subsequent launches work normally.
-
-### Why does this happen?
-
-This app is signed but not notarized with Apple (which requires a paid Developer account). The source code is fully available in this repository, and you can [build it yourself](#building) if you prefer.
+1. Re-grant Accessibility permission after each rebuild.
+2. If Gatekeeper still blocks the app, open the bundle from Finder once with **Open** to confirm the local build.
 
 ## Configuration
 

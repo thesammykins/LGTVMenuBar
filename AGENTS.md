@@ -29,15 +29,25 @@ Notes:
 
 ## DMG Build (Release Packaging)
 ```bash
-# Build a universal (arm64 + x86_64) release and create a DMG
+# Build a universal (arm64 + x86_64) development DMG (ad-hoc signing)
 ./scripts/build-dmg.sh
 
 # Clean build + DMG
 ./scripts/build-dmg.sh --clean
+
+# Build a locally signed release without notarization
+./scripts/build-dmg.sh --local-release
+
+# Build a signed and notarized release
+./scripts/build-dmg.sh --release
 ```
 
 Operational notes:
-- The DMG script performs ad-hoc signing; Accessibility permission must be re-granted after each build.
+- The default DMG script path performs ad-hoc signing; Accessibility permission must be re-granted after each ad-hoc build.
+- `--local-release` signs with a local `Developer ID Application` certificate but does not notarize.
+- `--release` requires a local `Developer ID Application` certificate plus notary credentials via `ASC_KEY_FILE`/`ASC_KEY_ID`/`ASC_ISSUER_ID` or a configured `ASC_1PASSWORD_ITEM`.
+- GitHub Actions release validation expects `ASC_CERTIFICATE`, `ASC_CERTIFICATE_PASSWORD`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`, and `ASC_ISSUER_ID` repo secrets.
+- When duplicate `Developer ID Application` subject names exist in Keychain after certificate rotation, resolve the certificate by SHA-1 identity hash before calling `codesign`; subject-name signing becomes ambiguous.
 - Release artifacts are written to `release/`.
 
 ## Versioning & Release Process
@@ -50,20 +60,27 @@ When pushing a new build:
      - MINOR: new features, non-breaking changes
      - MAJOR: breaking changes
 
-2. **Commit version changes**:
+2. **Validate the release workflow on the branch**:
+   ```bash
+   git push -u origin <branch>
+   gh workflow run "Build and Release" --ref <branch> -f version=X.Y.Z
+   gh run watch
+   ```
+
+3. **Commit version changes**:
    ```bash
    git add Sources/LGTVMenuBar/Info.plist
    git commit -m "chore: bump version to X.Y.Z (build N)"
    ```
 
-3. **Create and push git tag**:
+4. **Create and push git tag**:
    ```bash
    git tag vX.Y.Z
    git push origin main
    git push origin vX.Y.Z
    ```
 
-4. **Verify GitHub Actions workflow** triggers for the new tag (DMG build + release)
+5. **Verify GitHub Actions workflow** triggers for the new tag (DMG build + notarized release)
 
 Example:
 ```bash

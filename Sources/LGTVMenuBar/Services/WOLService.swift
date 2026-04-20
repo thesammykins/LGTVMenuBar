@@ -42,6 +42,12 @@ public final class WOLService: WOLServiceProtocol {
     
     /// Number of times MAC address is repeated in magic packet
     static let macRepeatCount = 16
+
+    /// Number of WOL packets to send for a single wake request.
+    static let sendAttemptCount = 3
+
+    /// Delay between repeated WOL packets.
+    static let retryDelay: Duration = .milliseconds(250)
     
     // MARK: - Properties
     
@@ -83,8 +89,13 @@ public final class WOLService: WOLServiceProtocol {
             // Create magic packet
             let magicPacket = try createMagicPacket(macAddress: normalizedMAC)
             
-            // Send packet via UDP broadcast
-            try await sendMagicPacket(magicPacket)
+            // Send multiple packets to tolerate transient network readiness after wake.
+            for attempt in 1...Self.sendAttemptCount {
+                try await sendMagicPacket(magicPacket)
+                if attempt < Self.sendAttemptCount {
+                    try? await Task.sleep(for: Self.retryDelay)
+                }
+            }
             
         } catch {
             // Wrap any error in LGTVError.wolError
