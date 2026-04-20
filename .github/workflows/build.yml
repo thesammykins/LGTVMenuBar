@@ -36,13 +36,67 @@ jobs:
       
       - name: Show Xcode version
         run: xcodebuild -version
-      
-      - name: Build DMG
+
+      - name: Build, sign, and notarize DMG
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
+          ASC_CERTIFICATE: ${{ secrets.ASC_CERTIFICATE }}
+          ASC_CERTIFICATE_PASSWORD: ${{ secrets.ASC_CERTIFICATE_PASSWORD }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
+          set -euo pipefail
+          umask 077
+
+          DEFAULT_KEYCHAIN=$(security default-keychain -d user | tr -d '"')
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer_id.p12"
+          ASC_KEY_FILE="$RUNNER_TEMP/AuthKey.p8"
+
+          cleanup() {
+            security default-keychain -d user -s "$DEFAULT_KEYCHAIN" >/dev/null 2>&1 || true
+            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+            rm -f "$CERTIFICATE_PATH" "$ASC_KEY_FILE"
+          }
+          trap cleanup EXIT
+
+          for required_var in ASC_CERTIFICATE ASC_CERTIFICATE_PASSWORD ASC_PRIVATE_KEY ASC_KEY_ID ASC_ISSUER_ID; do
+            if [ -z "${!required_var}" ]; then
+              echo "::error::Missing ${required_var} secret"
+              exit 1
+            fi
+          done
+
+          printf '%s' "$ASC_CERTIFICATE" | base64 -D > "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$ASC_CERTIFICATE_PASSWORD" "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$ASC_CERTIFICATE_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$ASC_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$CERTIFICATE_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$ASC_CERTIFICATE_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$DEFAULT_KEYCHAIN"
+
+          IDENTITY_LINE=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F 'Developer ID Application:' | head -n 1)
+          if [ -z "$IDENTITY_LINE" ]; then
+            echo "::error::No Developer ID Application identity found after import"
+            exit 1
+          fi
+
+          DEVELOPER_ID_IDENTITY=$(awk '{print $2}' <<< "$IDENTITY_LINE")
+          DEVELOPER_ID_IDENTITY_NAME=$(awk -F '"' '{print $2}' <<< "$IDENTITY_LINE")
+          export DEVELOPER_ID_IDENTITY
+          export DEVELOPER_ID_IDENTITY_NAME
+
+          printf '%s' "$ASC_PRIVATE_KEY" > "$ASC_KEY_FILE"
+          chmod 600 "$ASC_KEY_FILE"
+          export ASC_KEY_FILE
+
           chmod +x ./scripts/build-dmg.sh
-          ./scripts/build-dmg.sh
+          ./scripts/build-dmg.sh --release
       
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
@@ -62,3 +116,9 @@ jobs:
           generate_release_notes: true
           files: |
             release/*.dmg
+
+      - name: Cleanup signing materials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+          rm -f "$RUNNER_TEMP/developer_id.p12" "$RUNNER_TEMP/AuthKey.p8"

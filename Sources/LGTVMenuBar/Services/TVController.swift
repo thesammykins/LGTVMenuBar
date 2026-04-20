@@ -124,12 +124,24 @@ public final class TVController: TVControllerProtocol {
     // MARK: - Debouncing
     /// Timestamp of last wake execution (for debouncing rapid wake events)
     private var lastWakeExecution: Date = .distantPast
+
+    /// Prevent overlapping wake sequences while a previous wake is still running.
+    private var isWakeInProgress = false
     
     /// Timestamp of last sleep execution (for debouncing rapid sleep events)
     private var lastSleepExecution: Date = .distantPast
     
     /// Debounce interval in seconds (matches Hammerspoon's proven value)
     private let debounceInterval: TimeInterval = 10.0
+
+    /// Delay before the first reconnect attempt after sending Wake-on-LAN.
+    private let wakeConnectInitialDelay: Duration
+
+    /// Delay between reconnect attempts after a failed wake reconnect.
+    private let wakeConnectRetryDelay: Duration
+
+    /// Maximum number of reconnect attempts after wake.
+    private let wakeConnectMaxAttempts: Int
     
     // MARK: - Initialization
     
@@ -140,7 +152,10 @@ public final class TVController: TVControllerProtocol {
         keychainManager: KeychainManagerProtocol,
         mediaKeyManager: MediaKeyManagerProtocol,
         launchAtLoginManager: LaunchAtLoginManagerProtocol,
-        diagnosticLogger: DiagnosticLoggerProtocol
+        diagnosticLogger: DiagnosticLoggerProtocol,
+        wakeConnectInitialDelay: Duration = .seconds(1),
+        wakeConnectRetryDelay: Duration = .seconds(2),
+        wakeConnectMaxAttempts: Int = 3
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -149,6 +164,9 @@ public final class TVController: TVControllerProtocol {
         self.mediaKeyManager = mediaKeyManager
         self.launchAtLoginManager = launchAtLoginManager
         self.diagnosticLogger = diagnosticLogger
+        self.wakeConnectInitialDelay = wakeConnectInitialDelay
+        self.wakeConnectRetryDelay = wakeConnectRetryDelay
+        self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
         
         setupCallbacks()
         loadConfiguration()
@@ -167,7 +185,10 @@ public final class TVController: TVControllerProtocol {
         mediaKeyManager: MediaKeyManagerProtocol,
         launchAtLoginManager: LaunchAtLoginManagerProtocol,
         diagnosticLogger: DiagnosticLoggerProtocol,
-        arylicClient: ArylicVolumeClientProtocol?
+        arylicClient: ArylicVolumeClientProtocol?,
+        wakeConnectInitialDelay: Duration = .seconds(1),
+        wakeConnectRetryDelay: Duration = .seconds(2),
+        wakeConnectMaxAttempts: Int = 3
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -177,6 +198,9 @@ public final class TVController: TVControllerProtocol {
         self.launchAtLoginManager = launchAtLoginManager
         self.diagnosticLogger = diagnosticLogger
         self.arylicClient = arylicClient
+        self.wakeConnectInitialDelay = wakeConnectInitialDelay
+        self.wakeConnectRetryDelay = wakeConnectRetryDelay
+        self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
         
         setupCallbacks()
         loadConfiguration()
@@ -629,13 +653,9 @@ public final class TVController: TVControllerProtocol {
             }
         }
         
-        // Screen wake events (display wakes without full system sleep)
-        powerManagerMutable.onScreenWake = { [weak self] in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
-                await self?.handleMacWake()
-            }
-        }
+        // Screen wake and unlock events are intentionally not mapped to the
+        // full Wake-on-LAN flow. "Wake TV when Mac wakes" should only react
+        // to a real system wake.
         
         // Start monitoring
         powerManager.startMonitoring()
@@ -685,6 +705,12 @@ public final class TVController: TVControllerProtocol {
     
     private func handleMacWake() async {
         guard let config = configuration, config.wakeWithMac else { return }
+
+        if isWakeInProgress {
+            logger.info("Skipping wake - wake sequence already in progress")
+            logDiagnostic(level: "info", category: "TVController", message: "Wake attempt ignored - already in progress")
+            return
+        }
         
         // Debounce: prevent duplicate wake attempts within 10 seconds
         let now = Date()
@@ -694,7 +720,8 @@ public final class TVController: TVControllerProtocol {
             logDiagnostic(level: "info", category: "TVController", message: "Wake attempt debounced", metadata: ["timeSinceLastWake": "\(String(format: "%.1f", timeSinceLastWake))s"])
             return
         }
-        lastWakeExecution = now
+        isWakeInProgress = true
+        defer { isWakeInProgress = false }
         
         logger.info("Mac woke - waking TV")
         logDiagnostic(level: "info", category: "TVController", message: "Mac woke - waking TV")
@@ -704,34 +731,73 @@ public final class TVController: TVControllerProtocol {
         
         do {
             try await wake()
-            // Wait a bit for TV to boot, then connect
-            try await Task.sleep(for: .seconds(3))
-            try await connect()
-            
-            // Explicitly turn screen on
-            logger.info("Turning TV screen on")
-            logDiagnostic(level: "info", category: "TVController", message: "Turning TV screen on")
-            try await screenOn()
-            
-            if config.switchInputOnWake {
-                if let input = TVInputType(rawValue: config.preferredInput) {
-                    try await switchInput(input)
-                }
-            }
-            
-            // Set PC mode if enabled and not already set
-            if config.enablePCMode {
-                let currentIcon = capabilities?.inputIcons[config.preferredInput] ?? ""
-                if !currentIcon.contains("pc") {
-                    logger.info("Setting PC mode for \(config.preferredInput)")
-                    if let input = TVInputType(rawValue: config.preferredInput) {
-                        try await setPCMode(for: input, enabled: true)
-                    }
-                }
-            }
+            try await connectAfterWake()
+            lastWakeExecution = Date()
+            await performPostWakeActions(for: config)
         } catch {
             logger.error("Failed to wake TV: \(error.localizedDescription)")
             logDiagnostic(level: "error", category: "TVController", message: "Failed to wake TV", metadata: ["error": error.localizedDescription])
+        }
+    }
+
+    private func connectAfterWake() async throws {
+        var lastError: Error?
+
+        for attempt in 1...wakeConnectMaxAttempts {
+            if attempt == 1 {
+                try? await Task.sleep(for: wakeConnectInitialDelay)
+            } else {
+                try? await Task.sleep(for: wakeConnectRetryDelay)
+            }
+
+            do {
+                logger.info("Wake reconnect attempt \(attempt)")
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: ["attempt": "\(attempt)"])
+                try await connect()
+                logger.info("Wake reconnect succeeded on attempt \(attempt)")
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: ["attempt": "\(attempt)"])
+                return
+            } catch {
+                lastError = error
+                logger.warning("Wake reconnect attempt \(attempt) failed: \(error.localizedDescription)")
+                logDiagnostic(level: "warning", category: "TVController", message: "Wake reconnect attempt failed", metadata: ["attempt": "\(attempt)", "error": error.localizedDescription])
+                disconnect()
+            }
+        }
+
+        throw lastError ?? LGTVError.webosError("Failed to reconnect after wake")
+    }
+
+    private func performPostWakeActions(for config: TVConfiguration) async {
+        do {
+            logger.info("Turning TV screen on")
+            logDiagnostic(level: "info", category: "TVController", message: "Turning TV screen on")
+            try await screenOn()
+        } catch {
+            logger.warning("Failed to turn TV screen on after wake: \(error.localizedDescription)")
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to turn TV screen on after wake", metadata: ["error": error.localizedDescription])
+        }
+
+        if config.switchInputOnWake, let input = TVInputType(rawValue: config.preferredInput) {
+            do {
+                try await switchInput(input)
+            } catch {
+                logger.warning("Failed to switch input after wake: \(error.localizedDescription)")
+                logDiagnostic(level: "warning", category: "TVController", message: "Failed to switch input after wake", metadata: ["error": error.localizedDescription, "preferredInput": config.preferredInput])
+            }
+        }
+
+        guard config.enablePCMode else { return }
+
+        let currentIcon = capabilities?.inputIcons[config.preferredInput] ?? ""
+        guard !currentIcon.contains("pc"), let input = TVInputType(rawValue: config.preferredInput) else { return }
+
+        do {
+            logger.info("Setting PC mode for \(config.preferredInput)")
+            try await setPCMode(for: input, enabled: true)
+        } catch {
+            logger.warning("Failed to set PC mode after wake: \(error.localizedDescription)")
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to set PC mode after wake", metadata: ["error": error.localizedDescription, "preferredInput": config.preferredInput])
         }
     }
     

@@ -15,6 +15,9 @@ final class MockWebOSClient: WebOSClientProtocol {
     
     /// Error to throw when configured to throw
     var errorToThrow: Error = MockWebOSClientError.connectionFailed("Mock error")
+
+    /// Sequence of connect results to return on successive connect attempts.
+    var connectResults: [Result<Void, Error>] = []
     
     /// Simulated connection state
     var mockConnectionState: ConnectionState = .disconnected
@@ -51,6 +54,25 @@ final class MockWebOSClient: WebOSClientProtocol {
     func connect(to configuration: TVConfiguration, stateChangeCallback: @escaping @Sendable (ConnectionState) -> Void) async throws {
         connectCalls.append((configuration: configuration, timestamp: Date()))
         self.stateChangeCallback = stateChangeCallback
+
+        if !connectResults.isEmpty {
+            let result = connectResults.removeFirst()
+
+            if asyncDelay > 0 {
+                try await Task.sleep(for: .seconds(asyncDelay))
+            }
+
+            switch result {
+            case .success:
+                mockConnectionState = .connected
+                stateChangeCallback(.connected)
+            case .failure(let error):
+                mockConnectionState = .error(error)
+                stateChangeCallback(.error(error))
+                throw error
+            }
+            return
+        }
         
         if shouldThrowOnConnect {
             throw errorToThrow
@@ -119,6 +141,7 @@ final class MockWebOSClient: WebOSClientProtocol {
         shouldThrowOnConnect = false
         shouldThrowOnSendCommand = false
         errorToThrow = MockWebOSClientError.connectionFailed("Mock error")
+        connectResults.removeAll()
         mockConnectionState = .disconnected
         asyncDelay = 0.0
         
