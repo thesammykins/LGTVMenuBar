@@ -38,6 +38,9 @@ final class MockPowerManager: PowerManagerProtocol, Sendable {
     
     /// Callback when display wakes
     var onScreenWake: (@Sendable () -> Void)?
+
+    /// Callback when screen unlocks
+    var onScreenUnlock: (@Sendable () -> Void)?
     
     // MARK: - Call History
     
@@ -121,6 +124,7 @@ final class MockPowerManager: PowerManagerProtocol, Sendable {
         onWake = nil
         onScreenSleep = nil
         onScreenWake = nil
+        onScreenUnlock = nil
     }
     
     /// Get the number of times preventSleep was called
@@ -200,9 +204,9 @@ final class MockPowerManager: PowerManagerProtocol, Sendable {
         onScreenWake?()
     }
     
-    /// Simulate a screen unlock event by calling the onScreenWake callback
+    /// Simulate a screen unlock event by calling the onScreenUnlock callback
     func simulateScreenUnlockEvent() {
-        onScreenWake?()
+        onScreenUnlock?()
     }
 }
 

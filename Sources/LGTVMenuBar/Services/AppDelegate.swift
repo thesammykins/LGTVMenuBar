@@ -65,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         guard let controller = controller else { return }
         controller.refreshMediaKeyCapture()
+        Task {
+            await controller.ensureTVAwake(reason: "appActivated")
+        }
     }
     
     // MARK: - Status Item Setup
@@ -191,9 +194,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController?.view.window?.makeKey()
         NSApp.activate(ignoringOtherApps: true)
 
-        if controller.configuration != nil && (controller.connectionState.isDisconnected || controller.connectionState.hasError) {
+        if controller.configuration != nil {
             Task {
-                try? await controller.connect()
+                await controller.ensureTVAwake(reason: "menuOpened")
             }
         }
         

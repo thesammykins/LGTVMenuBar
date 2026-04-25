@@ -27,6 +27,10 @@ struct TVControllerWakeTests {
         let mockLaunch = MockLaunchAtLoginManager()
         let mockDiagnostic = MockDiagnosticLogger()
 
+        mockWebOS.powerStatusResults = [
+            .success(TVPowerStatus(state: "Screen Off"))
+        ]
+
         let controller = TVController(
             webOSClient: mockWebOS,
             wolService: mockWOL,
@@ -61,8 +65,8 @@ struct TVControllerWakeTests {
         #expect(mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
     }
 
-    @Test("screen wake does not trigger full wake flow")
-    func screenWakeDoesNotTriggerWakeFlow() async throws {
+    @Test("screen wake turns screen on without WOL when TV is reachable")
+    func screenWakeTurnsScreenOnWithoutWOLWhenReachable() async throws {
         let mockPowerManager = MockPowerManager()
         let mockWebOS = MockWebOSClient()
         let mockWOL = MockWOLService()
@@ -92,12 +96,159 @@ struct TVControllerWakeTests {
         )
         try controller.saveConfiguration(config)
 
+        try await controller.connect()
+
+        mockWebOS.mockPowerStatus = TVPowerStatus(state: "Screen Off")
+        let connectCallCountBeforeWake = mockWebOS.connectCallCount
+
         mockPowerManager.simulateScreenWakeEvent()
-        mockPowerManager.simulateScreenUnlockEvent()
-        try await Task.sleep(for: .milliseconds(50))
+
+        await waitUntil {
+            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
+        }
 
         #expect(mockWOL.wakeCalls.isEmpty)
-        #expect(mockWebOS.connectCallCount == 0)
+        #expect(mockWebOS.connectCallCount == connectCallCountBeforeWake)
+        #expect(mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
+    }
+
+    @Test("screen unlock turns screen on without WOL when TV is reachable")
+    func screenUnlockTurnsScreenOnWithoutWOLWhenReachable() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(10),
+            wakeConnectRetryDelay: .milliseconds(10),
+            wakeConnectMaxAttempts: 3
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+
+        try await controller.connect()
+
+        mockWebOS.mockPowerStatus = TVPowerStatus(state: "Screen Off")
+        let connectCallCountBeforeWake = mockWebOS.connectCallCount
+
+        mockPowerManager.simulateScreenUnlockEvent()
+
+        await waitUntil {
+            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
+        }
+
+        #expect(mockWOL.wakeCalls.isEmpty)
+        #expect(mockWebOS.connectCallCount == connectCallCountBeforeWake)
+        #expect(mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
+    }
+
+    @Test("active TV power state is a no-op")
+    func activePowerStateIsNoOp() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(10),
+            wakeConnectRetryDelay: .milliseconds(10),
+            wakeConnectMaxAttempts: 3
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+
+        try await controller.connect()
+
+        let connectCallCountBeforeWake = mockWebOS.connectCallCount
+        mockWebOS.mockPowerStatus = TVPowerStatus(state: "Active")
+
+        mockPowerManager.simulateWakeEvent()
+
+        await waitUntil {
+            mockDiagnostic.wasLogged(message: "TV already awake")
+        }
+
+        #expect(mockWOL.wakeCalls.isEmpty)
+        #expect(mockWebOS.connectCallCount == connectCallCountBeforeWake)
+        #expect(!mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
+    }
+
+    @Test("pixel refresher power state is not interrupted")
+    func pixelRefresherPowerStateIsNotInterrupted() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(10),
+            wakeConnectRetryDelay: .milliseconds(10),
+            wakeConnectMaxAttempts: 3
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+
+        try await controller.connect()
+
+        mockWebOS.mockPowerStatus = TVPowerStatus(state: "Active Standby")
+
+        mockPowerManager.simulateWakeEvent()
+
+        await waitUntil {
+            mockDiagnostic.wasLogged(message: "TV pixel refresher active - recovery skipped")
+        }
+
+        #expect(mockWOL.wakeCalls.isEmpty)
+        #expect(!mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
     }
 
     @Test("failed wake attempt does not debounce the next wake event")

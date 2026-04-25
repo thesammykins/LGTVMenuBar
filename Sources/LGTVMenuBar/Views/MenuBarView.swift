@@ -136,7 +136,7 @@ private struct ConnectionSection: View {
                 Task {
                     isWaking = true
                     defer { isWaking = false }
-                    try? await controller.wake()
+                    await controller.ensureTVAwake(reason: "manualWake", requiresWakePreference: false)
                 }
             } label: {
                 Label("Wake TV", systemImage: "power")

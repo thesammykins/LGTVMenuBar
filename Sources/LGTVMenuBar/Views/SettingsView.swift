@@ -500,6 +500,7 @@ struct DiagnosticsTab: View {
     @State private var errorMessage: String = ""
     @State private var showingDeviceDetailsSuccess = false
     @State private var isCapturingDeviceDetails = false
+    @State private var countUpdateTimer: Timer?
     
     var body: some View {
         Form {
@@ -596,6 +597,10 @@ struct DiagnosticsTab: View {
         .padding(.vertical, 4)
         .onAppear {
             loadDiagnosticState()
+            startCountUpdates()
+        }
+        .onDisappear {
+            stopCountUpdates()
         }
         .alert("Export Successful", isPresented: $showingExportSuccess) {
             Button("OK", role: .cancel) { }
@@ -628,6 +633,20 @@ struct DiagnosticsTab: View {
     private func updateCounts() {
         entryCount = controller.diagnosticLogger.entryCount
         recentEntryCount = controller.diagnosticLogger.recentEntryCount
+    }
+
+    private func startCountUpdates() {
+        stopCountUpdates()
+        countUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            Task { @MainActor in
+                updateCounts()
+            }
+        }
+    }
+
+    private func stopCountUpdates() {
+        countUpdateTimer?.invalidate()
+        countUpdateTimer = nil
     }
     
     private func exportToDesktop() {

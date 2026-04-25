@@ -11,6 +11,7 @@ public protocol PowerManagerProtocol: Sendable {
     var onWake: (@Sendable () -> Void)? { get set }
     var onScreenSleep: (@Sendable () -> Void)? { get set }
     var onScreenWake: (@Sendable () -> Void)? { get set }
+    var onScreenUnlock: (@Sendable () -> Void)? { get set }
     func preventSleep() async throws
     func allowSleep() async throws
     func isSystemSleeping() async -> Bool
@@ -45,6 +46,9 @@ final class PowerManager: PowerManagerProtocol {
     
     /// Callback when display wakes
     var onScreenWake: (@Sendable () -> Void)?
+
+    /// Callback when the locked screen is unlocked
+    var onScreenUnlock: (@Sendable () -> Void)?
     
     /// Storage for workspace notification observers
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
@@ -219,7 +223,7 @@ final class PowerManager: PowerManagerProtocol {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.logger.info("\("Screens did unlock", privacy: .public)")
-                self?.onScreenWake?()  // Reuse screenWake callback - unlock = wake
+                self?.onScreenUnlock?()
             }
         }
         workspaceNotificationObservers.append(screenUnlockObserver)

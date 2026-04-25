@@ -8,6 +8,7 @@ public protocol WebOSClientProtocol {
     func connect(to configuration: TVConfiguration, stateChangeCallback: @escaping @Sendable (ConnectionState) -> Void) async throws
     func disconnect()
     func sendCommand(_ command: WebOSCommand) async throws
+    func getPowerStatus() async throws -> TVPowerStatus
     func setCapabilityCallback(_ callback: @escaping @Sendable (TVCapabilities) -> Void)
     func setInputChangeCallback(_ callback: @escaping @Sendable (TVInputType) -> Void)
     func setVolumeChangeCallback(_ callback: @escaping @Sendable (Int, Bool) -> Void)
@@ -80,7 +81,7 @@ final class WebOSClient: WebOSClientProtocol {
     private var messageCounter = 1
     
     /// Pending requests awaiting responses
-    private var pendingRequests: [String: CheckedContinuation<Any, Error>] = [:]
+    private var pendingRequests: [String: CheckedContinuation<TVPowerStatus, Error>] = [:]
 
     /// Continuation used while waiting for the TV to acknowledge registration.
     private var handshakeContinuation: CheckedContinuation<Void, Error>?
@@ -354,6 +355,10 @@ final class WebOSClient: WebOSClientProtocol {
             throw LGTVError.webosError("Failed to send command: \(error.localizedDescription)")
         }
     }
+
+    func getPowerStatus() async throws -> TVPowerStatus {
+        try await sendPowerStatusRequest()
+    }
     
     /// Set callback for TV capability updates
     /// - Parameter callback: Closure called when capabilities are updated
@@ -585,6 +590,8 @@ final class WebOSClient: WebOSClientProtocol {
     private func handleResponseMessage(_ messageDict: [String: Any]) async {
         guard let payload = messageDict["payload"] as? [String: Any] else { return }
 
+        resumePendingRequestIfNeeded(messageDict: messageDict, payload: payload)
+
         // Debug: log full payload for diagnosis
         logger.debug("Response payload keys: \(payload.keys.sorted())")
 
@@ -797,6 +804,74 @@ final class WebOSClient: WebOSClientProtocol {
         }
     }
 
+    private func sendPowerStatusRequest(timeout: TimeInterval = 5) async throws -> TVPowerStatus {
+        guard _connectionState == .connected, handshakeCompleted else {
+            throw LGTVError.webosError("Not connected to TV")
+        }
+
+        if let testSendCommandHandler {
+            try await testSendCommandHandler(.getPowerState)
+            return TVPowerStatus()
+        }
+
+        let messageDict = try createCommandMessage(.getPowerState)
+        guard let requestID = messageDict["id"] as? String else {
+            throw LGTVError.webosError("Request message is missing an id")
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: messageDict)
+        let string = String(data: data, encoding: .utf8)!
+
+        guard let webSocketTask else {
+            throw LGTVError.webosError("WebSocket connection is unavailable")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingRequests[requestID] = continuation
+
+            webSocketTask.send(.string(string)) { [weak self] error in
+                guard let error else { return }
+
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if let pendingRequest = self.pendingRequests.removeValue(forKey: requestID) {
+                        self.logger.error("Failed to send awaited command: \(error.localizedDescription, privacy: .public)")
+                        pendingRequest.resume(throwing: error)
+                    }
+                }
+            }
+
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard let self else { return }
+                if let pendingRequest = self.pendingRequests.removeValue(forKey: requestID) {
+                    pendingRequest.resume(throwing: LGTVError.webosError("Request timed out: getPowerState"))
+                }
+            }
+        }
+    }
+
+    private func resumePendingRequestIfNeeded(messageDict: [String: Any], payload: [String: Any]) {
+        guard let requestID = messageDict["id"] as? String,
+              let pendingRequest = pendingRequests.removeValue(forKey: requestID) else {
+            return
+        }
+
+        if let returnValue = payload["returnValue"] as? Bool, returnValue == false {
+            let errorText = payload["errorText"] as? String
+            let errorCode = payload["errorCode"] as? String
+            let message: String
+            if let errorText, let errorCode {
+                message = "\(errorText) (\(errorCode))"
+            } else {
+                message = errorText ?? errorCode ?? "WebOS request failed"
+            }
+            pendingRequest.resume(throwing: LGTVError.webosError(message.isEmpty ? "WebOS request failed" : message))
+        } else {
+            pendingRequest.resume(returning: TVPowerStatus(payload: payload))
+        }
+    }
+
     private func failHandshake(_ error: Error) {
         guard let handshakeContinuation else { return }
         self.handshakeContinuation = nil
@@ -895,6 +970,8 @@ final class WebOSClient: WebOSClientProtocol {
         case .subscribeVolume:
             message["type"] = "subscribe"
             message["uri"] = "ssap://audio/getVolume"
+        case .getPowerState:
+            message["uri"] = "ssap://com.webos.service.tvpower/power/getPowerState"
         case .mute:
             message["uri"] = "ssap://audio/mute"
         case .unmute:
@@ -904,8 +981,10 @@ final class WebOSClient: WebOSClientProtocol {
             message["payload"] = ["inputId": inputId]
         case .screenOn:
             message["uri"] = "ssap://com.webos.service.tvpower/power/turnOnScreen"
+            message["payload"] = ["standbyMode": "active"]
         case .screenOff:
             message["uri"] = "ssap://com.webos.service.tvpower/power/turnOffScreen"
+            message["payload"] = ["standbyMode": "active"]
         case .setDeviceInfo(let inputId, let icon, let label):
             message["uri"] = "ssap://com.webos.service.eim/setDeviceInfo"
             message["payload"] = ["id": inputId, "icon": "\(icon).png", "label": label]

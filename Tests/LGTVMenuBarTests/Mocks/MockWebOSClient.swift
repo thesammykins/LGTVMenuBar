@@ -18,6 +18,12 @@ final class MockWebOSClient: WebOSClientProtocol {
 
     /// Sequence of connect results to return on successive connect attempts.
     var connectResults: [Result<Void, Error>] = []
+
+    /// Sequence of power status results to return on successive power checks.
+    var powerStatusResults: [Result<TVPowerStatus, Error>] = []
+
+    /// Default power status when no explicit result is queued.
+    var mockPowerStatus = TVPowerStatus(state: "Active")
     
     /// Simulated connection state
     var mockConnectionState: ConnectionState = .disconnected
@@ -35,6 +41,9 @@ final class MockWebOSClient: WebOSClientProtocol {
     
     /// History of sendCommand calls
     private(set) var sendCommandCalls: [(command: WebOSCommand, timestamp: Date)] = []
+
+    /// History of power status requests
+    private(set) var getPowerStatusCalls: [Date] = []
     
     /// Stored callbacks
     private var stateChangeCallback: (@Sendable (ConnectionState) -> Void)?
@@ -105,6 +114,35 @@ final class MockWebOSClient: WebOSClientProtocol {
             try await Task.sleep(for: .seconds(asyncDelay))
         }
     }
+
+    func getPowerStatus() async throws -> TVPowerStatus {
+        getPowerStatusCalls.append(Date())
+
+        if !powerStatusResults.isEmpty {
+            let result = powerStatusResults.removeFirst()
+
+            if asyncDelay > 0 {
+                try await Task.sleep(for: .seconds(asyncDelay))
+            }
+
+            switch result {
+            case .success(let status):
+                return status
+            case .failure(let error):
+                throw error
+            }
+        }
+
+        if shouldThrowOnSendCommand {
+            throw errorToThrow
+        }
+
+        if asyncDelay > 0 {
+            try await Task.sleep(for: .seconds(asyncDelay))
+        }
+
+        return mockPowerStatus
+    }
     
     func setCapabilityCallback(_ callback: @escaping @Sendable (TVCapabilities) -> Void) {
         self.capabilityCallback = callback
@@ -137,11 +175,14 @@ final class MockWebOSClient: WebOSClientProtocol {
         connectCalls.removeAll()
         disconnectCalls.removeAll()
         sendCommandCalls.removeAll()
+        getPowerStatusCalls.removeAll()
         
         shouldThrowOnConnect = false
         shouldThrowOnSendCommand = false
         errorToThrow = MockWebOSClientError.connectionFailed("Mock error")
         connectResults.removeAll()
+        powerStatusResults.removeAll()
+        mockPowerStatus = TVPowerStatus(state: "Active")
         mockConnectionState = .disconnected
         asyncDelay = 0.0
         
@@ -168,6 +209,10 @@ final class MockWebOSClient: WebOSClientProtocol {
     var sendCommandCallCount: Int {
         return sendCommandCalls.count
     }
+
+    var getPowerStatusCallCount: Int {
+        return getPowerStatusCalls.count
+    }
     
     /// Get timestamp of most recent connect call
     var lastConnectCall: Date? {
@@ -182,6 +227,10 @@ final class MockWebOSClient: WebOSClientProtocol {
     /// Get timestamp of most recent sendCommand call
     var lastSendCommandCall: Date? {
         return sendCommandCalls.last?.timestamp
+    }
+
+    var lastGetPowerStatusCall: Date? {
+        return getPowerStatusCalls.last
     }
     
     /// Simulate connection state change

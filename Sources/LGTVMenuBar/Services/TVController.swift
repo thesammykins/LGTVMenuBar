@@ -122,9 +122,6 @@ public final class TVController: TVControllerProtocol {
     private var diagnosticCaptureTimer: Timer?
     
     // MARK: - Debouncing
-    /// Timestamp of last wake execution (for debouncing rapid wake events)
-    private var lastWakeExecution: Date = .distantPast
-
     /// Prevent overlapping wake sequences while a previous wake is still running.
     private var isWakeInProgress = false
     
@@ -142,6 +139,16 @@ public final class TVController: TVControllerProtocol {
 
     /// Maximum number of reconnect attempts after wake.
     private let wakeConnectMaxAttempts: Int
+
+    /// Maximum number of Wake-on-LAN send attempts for one recovery sequence.
+    private let wakePacketMaxAttempts = 3
+
+    private enum ScreenRecoveryOutcome: Equatable {
+        case alreadyAwake
+        case screenOnSent
+        case needsPowerOn
+        case skipped
+    }
     
     // MARK: - Initialization
     
@@ -310,7 +317,63 @@ public final class TVController: TVControllerProtocol {
         }
         
         logger.info("Sending WOL to \(config.name)")
+        logDiagnostic(level: "info", category: "TVController", message: "Sending Wake-on-LAN", metadata: tvIdentityMetadata(for: config))
         try await wolService.sendWakeOnLAN(macAddress: config.macAddress)
+        logDiagnostic(level: "info", category: "TVController", message: "Wake-on-LAN packets sent", metadata: tvIdentityMetadata(for: config))
+    }
+
+    /// Ensure the configured TV is powered and its display panel is on when automation says it should be available.
+    public func ensureTVAwake(reason: String, requiresWakePreference: Bool = true) async {
+        guard let config = configuration else {
+            logger.info("Skipping TV awake recovery - no TV configured")
+            logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery skipped - no configuration", metadata: ["reason": reason])
+            return
+        }
+
+        if requiresWakePreference && !config.wakeWithMac {
+            logger.info("Skipping TV awake recovery - wake automation disabled")
+            logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery skipped - wake automation disabled", metadata: wakeMetadata(reason: reason, config: config))
+            return
+        }
+
+        if isWakeInProgress {
+            logger.info("Skipping TV awake recovery - recovery already in progress")
+            logDiagnostic(level: "info", category: "TVController", message: "Wake attempt ignored - already in progress", metadata: wakeMetadata(reason: reason, config: config))
+            return
+        }
+
+        isWakeInProgress = true
+        defer { isWakeInProgress = false }
+
+        logger.info("Ensuring TV is awake for reason: \(reason)")
+        logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery started", metadata: wakeMetadata(reason: reason, config: config))
+
+        do {
+            if connectionState.isConnected {
+                let outcome = await ensureConnectedScreenIsOn(reason: reason, config: config)
+                if outcome == .screenOnSent {
+                    await performPostWakeActions(for: config)
+                    return
+                }
+                if outcome != .needsPowerOn {
+                    return
+                }
+            }
+
+            disconnect()
+            try await sendWakePacketsWithRetries(config: config, reason: reason)
+            try await connectAfterWake(reason: reason)
+
+            let outcome = await ensureConnectedScreenIsOn(reason: reason, config: config)
+            if outcome == .skipped || outcome == .needsPowerOn {
+                return
+            }
+
+            await performPostWakeActions(for: config)
+        } catch {
+            logger.error("Failed to ensure TV is awake: \(error.localizedDescription)")
+            logDiagnostic(level: "error", category: "TVController", message: "Failed to ensure TV is awake", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+        }
     }
     
     // MARK: - Power Control
@@ -474,16 +537,27 @@ public final class TVController: TVControllerProtocol {
     public func setDiagnosticLoggingEnabled(_ enabled: Bool) {
         if enabled {
             diagnosticLogger.enable()
+            logDiagnostic(level: "warning", category: "Diagnostics", message: "Diagnostic logging enabled", metadata: deviceDetailsMetadata())
         } else {
+            logDiagnostic(level: "warning", category: "Diagnostics", message: "Diagnostic logging disabled", metadata: deviceDetailsMetadata())
             diagnosticLogger.disable()
         }
 
         updateDiagnosticCaptureSchedule()
+
+        if enabled && diagnosticLogger.isDebugMode {
+            capturePeriodicDiagnostics()
+        }
     }
 
     public func setDiagnosticDebugMode(_ enabled: Bool) {
         diagnosticLogger.setDebugMode(enabled)
         updateDiagnosticCaptureSchedule()
+        logDiagnostic(level: enabled ? "info" : "warning", category: "Diagnostics", message: "Diagnostic debug mode \(enabled ? "enabled" : "disabled")", metadata: deviceDetailsMetadata())
+
+        if enabled && diagnosticLogger.isEnabled {
+            capturePeriodicDiagnostics()
+        }
     }
 
     public func gatherDeviceDetails() async -> Bool {
@@ -642,7 +716,7 @@ public final class TVController: TVControllerProtocol {
         powerManagerMutable.onWake = { [weak self] in
             guard let self = self else { return }
             Task { @MainActor [weak self] in
-                await self?.handleMacWake()
+                await self?.ensureTVAwake(reason: "systemWake")
             }
         }
         
@@ -653,9 +727,19 @@ public final class TVController: TVControllerProtocol {
             }
         }
         
-        // Screen wake and unlock events are intentionally not mapped to the
-        // full Wake-on-LAN flow. "Wake TV when Mac wakes" should only react
-        // to a real system wake.
+        powerManagerMutable.onScreenWake = { [weak self] in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                await self?.ensureTVAwake(reason: "screenWake")
+            }
+        }
+
+        powerManagerMutable.onScreenUnlock = { [weak self] in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                await self?.ensureTVAwake(reason: "screenUnlock")
+            }
+        }
         
         // Start monitoring
         powerManager.startMonitoring()
@@ -703,44 +787,28 @@ public final class TVController: TVControllerProtocol {
     }
     #endif
     
-    private func handleMacWake() async {
-        guard let config = configuration, config.wakeWithMac else { return }
+    private func sendWakePacketsWithRetries(config: TVConfiguration, reason: String) async throws {
+        var lastError: Error?
 
-        if isWakeInProgress {
-            logger.info("Skipping wake - wake sequence already in progress")
-            logDiagnostic(level: "info", category: "TVController", message: "Wake attempt ignored - already in progress")
-            return
+        for attempt in 1...wakePacketMaxAttempts {
+            do {
+                logDiagnostic(level: "info", category: "TVController", message: "Wake-on-LAN attempt", metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "\(attempt)"]))
+                try await wake()
+                return
+            } catch {
+                lastError = error
+                logger.warning("Wake-on-LAN attempt \(attempt) failed: \(error.localizedDescription)")
+                logDiagnostic(level: "warning", category: "TVController", message: "Wake-on-LAN attempt failed", metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "\(attempt)", "error": error.localizedDescription]))
+                if attempt < wakePacketMaxAttempts {
+                    try? await Task.sleep(for: wakeConnectRetryDelay)
+                }
+            }
         }
-        
-        // Debounce: prevent duplicate wake attempts within 10 seconds
-        let now = Date()
-        let timeSinceLastWake = now.timeIntervalSince(lastWakeExecution)
-        if timeSinceLastWake < debounceInterval {
-            logger.info("Skipping wake - debounced (last execution \(String(format: "%.1f", timeSinceLastWake))s ago)")
-            logDiagnostic(level: "info", category: "TVController", message: "Wake attempt debounced", metadata: ["timeSinceLastWake": "\(String(format: "%.1f", timeSinceLastWake))s"])
-            return
-        }
-        isWakeInProgress = true
-        defer { isWakeInProgress = false }
-        
-        logger.info("Mac woke - waking TV")
-        logDiagnostic(level: "info", category: "TVController", message: "Mac woke - waking TV")
-        
-        // Always disconnect first to ensure clean state for reconnection
-        disconnect()
-        
-        do {
-            try await wake()
-            try await connectAfterWake()
-            lastWakeExecution = Date()
-            await performPostWakeActions(for: config)
-        } catch {
-            logger.error("Failed to wake TV: \(error.localizedDescription)")
-            logDiagnostic(level: "error", category: "TVController", message: "Failed to wake TV", metadata: ["error": error.localizedDescription])
-        }
+
+        throw lastError ?? LGTVError.wolError(WOLError.broadcastFailed)
     }
 
-    private func connectAfterWake() async throws {
+    private func connectAfterWake(reason: String) async throws {
         var lastError: Error?
 
         for attempt in 1...wakeConnectMaxAttempts {
@@ -752,15 +820,15 @@ public final class TVController: TVControllerProtocol {
 
             do {
                 logger.info("Wake reconnect attempt \(attempt)")
-                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: ["attempt": "\(attempt)"])
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: ["attempt": "\(attempt)", "reason": reason])
                 try await connect()
                 logger.info("Wake reconnect succeeded on attempt \(attempt)")
-                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: ["attempt": "\(attempt)"])
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: ["attempt": "\(attempt)", "reason": reason])
                 return
             } catch {
                 lastError = error
                 logger.warning("Wake reconnect attempt \(attempt) failed: \(error.localizedDescription)")
-                logDiagnostic(level: "warning", category: "TVController", message: "Wake reconnect attempt failed", metadata: ["attempt": "\(attempt)", "error": error.localizedDescription])
+                logDiagnostic(level: "warning", category: "TVController", message: "Wake reconnect attempt failed", metadata: ["attempt": "\(attempt)", "reason": reason, "error": error.localizedDescription])
                 disconnect()
             }
         }
@@ -768,16 +836,57 @@ public final class TVController: TVControllerProtocol {
         throw lastError ?? LGTVError.webosError("Failed to reconnect after wake")
     }
 
-    private func performPostWakeActions(for config: TVConfiguration) async {
+    private func ensureConnectedScreenIsOn(reason: String, config: TVConfiguration) async -> ScreenRecoveryOutcome {
+        do {
+            let powerStatus = try await webOSClient.getPowerStatus()
+            logDiagnostic(level: "info", category: "TVController", message: "TV power state observed", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+
+            switch powerStatus.normalizedState {
+            case .active, .screenOnInProgress, .screenSaver:
+                logDiagnostic(level: "info", category: "TVController", message: "TV already awake", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+                return .alreadyAwake
+            case .screenOff:
+                return await turnScreenOnAfterPowerCheck(reason: reason, config: config, powerStatus: powerStatus)
+            case .off:
+                logDiagnostic(level: "info", category: "TVController", message: "TV power state indicates power-on is needed", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+                return .needsPowerOn
+            case .turningOff:
+                logDiagnostic(level: "info", category: "TVController", message: "TV is already turning off - recovery skipped", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+                return .skipped
+            case .pixelRefresher:
+                logDiagnostic(level: "warning", category: "TVController", message: "TV pixel refresher active - recovery skipped", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+                return .skipped
+            case .unknown:
+                logger.warning("TV power state unknown; sending screen-on as fallback")
+                logDiagnostic(level: "warning", category: "TVController", message: "TV power state unknown - sending screen on", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+                return await turnScreenOnAfterPowerCheck(reason: reason, config: config, powerStatus: powerStatus)
+            }
+        } catch {
+            logger.warning("Failed to query TV power state: \(error.localizedDescription)")
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to query TV power state - sending screen on", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+            return await turnScreenOnAfterPowerCheck(reason: reason, config: config, powerStatus: nil)
+        }
+    }
+
+    private func turnScreenOnAfterPowerCheck(reason: String, config: TVConfiguration, powerStatus: TVPowerStatus?) async -> ScreenRecoveryOutcome {
         do {
             logger.info("Turning TV screen on")
-            logDiagnostic(level: "info", category: "TVController", message: "Turning TV screen on")
+            var metadata = wakeMetadata(reason: reason, config: config)
+            if let powerStatus {
+                metadata.merge(powerStatus.diagnosticMetadata) { _, new in new }
+            }
+            logDiagnostic(level: "info", category: "TVController", message: "Turning TV screen on", metadata: metadata)
             try await screenOn()
+            logDiagnostic(level: "info", category: "TVController", message: "TV screen-on command sent", metadata: metadata)
+            return .screenOnSent
         } catch {
-            logger.warning("Failed to turn TV screen on after wake: \(error.localizedDescription)")
-            logDiagnostic(level: "warning", category: "TVController", message: "Failed to turn TV screen on after wake", metadata: ["error": error.localizedDescription])
+            logger.warning("Failed to turn TV screen on: \(error.localizedDescription)")
+            logDiagnostic(level: "warning", category: "TVController", message: "Failed to turn TV screen on", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+            return .skipped
         }
+    }
 
+    private func performPostWakeActions(for config: TVConfiguration) async {
         if config.switchInputOnWake, let input = TVInputType(rawValue: config.preferredInput) {
             do {
                 try await switchInput(input)
@@ -802,7 +911,15 @@ public final class TVController: TVControllerProtocol {
     }
     
     private func handleMacSleep() async {
-        guard let config = configuration, config.sleepWithMac else { return }
+        guard let config = configuration else {
+            logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - no configuration")
+            return
+        }
+
+        guard config.sleepWithMac else {
+            logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - sleep automation disabled", metadata: tvIdentityMetadata(for: config))
+            return
+        }
         
         // Debounce: prevent duplicate sleep attempts within 10 seconds
         let now = Date()
@@ -902,6 +1019,22 @@ public final class TVController: TVControllerProtocol {
         metadata["bundleIdentifier"] = Bundle.main.bundleIdentifier ?? "unknown"
         metadata["bundlePath"] = Bundle.main.bundleURL.path
         metadata["executablePath"] = Bundle.main.executableURL?.path ?? "unknown"
+        return metadata
+    }
+
+    private func tvIdentityMetadata(for config: TVConfiguration) -> [String: String] {
+        [
+            "tvName": config.name,
+            "ipAddress": config.ipAddress,
+            "preferredInput": config.preferredInput
+        ]
+    }
+
+    private func wakeMetadata(reason: String, config: TVConfiguration, additional: [String: String] = [:]) -> [String: String] {
+        var metadata = tvIdentityMetadata(for: config)
+        metadata["reason"] = reason
+        metadata["connectionState"] = "\(connectionState)"
+        metadata.merge(additional) { _, new in new }
         return metadata
     }
 

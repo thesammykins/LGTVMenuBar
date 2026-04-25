@@ -258,7 +258,7 @@ struct PowerManagerTests {
         
         #expect(callbackInvoked.value == true)
     }
-    
+
     @Test("MockPowerManager callback simulation is safe when callback is nil")
     @MainActor
     func mockCallbackSimulationIsSafeWithNilCallback() {
@@ -269,6 +269,7 @@ struct PowerManagerTests {
         mockManager.simulateWakeEvent()
         mockManager.simulateScreenSleepEvent()
         mockManager.simulateScreenWakeEvent()
+        mockManager.simulateScreenUnlockEvent()
         
         // If we reach here without crashing, the test passes
         #expect(Bool(true))
@@ -425,17 +426,18 @@ struct PowerManagerTests {
         #expect(mockManager.onWake == nil)
         #expect(mockManager.onScreenSleep == nil)
         #expect(mockManager.onScreenWake == nil)
+        #expect(mockManager.onScreenUnlock == nil)
     }
     
     // MARK: - Phase 2: Screen Unlock Event Tests
     
-    @Test("MockPowerManager simulateScreenUnlockEvent invokes onScreenWake callback")
+    @Test("MockPowerManager simulateScreenUnlockEvent invokes onScreenUnlock callback")
     @MainActor
     func mockSimulateScreenUnlockEventInvokesCallback() async {
         let mockManager = MockPowerManager()
         let callbackInvoked = UncheckedSendableBox(false)
         
-        mockManager.onScreenWake = {
+        mockManager.onScreenUnlock = {
             callbackInvoked.value = true
         }
         
@@ -472,12 +474,12 @@ struct PowerManagerTests {
         // Note: This test documents expected behavior for Phase 2
         // The actual PowerManager should register an observer for:
         // NSWorkspace.screensDidUnlockNotification
-        // which triggers the onScreenWake callback
+        // which triggers the onScreenUnlock callback
         
         let mockManager = MockPowerManager()
         let unlockEventReceived = UncheckedSendableBox(false)
         
-        mockManager.onScreenWake = {
+        mockManager.onScreenUnlock = {
             unlockEventReceived.value = true
         }
         
