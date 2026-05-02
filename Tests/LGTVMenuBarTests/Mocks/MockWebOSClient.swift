@@ -12,6 +12,9 @@ final class MockWebOSClient: WebOSClientProtocol {
     
     /// Whether sendCommand should throw an error
     var shouldThrowOnSendCommand = false
+
+    /// Whether command failures should transition the simulated connection to an error state.
+    var transitionToErrorOnCommandFailure = false
     
     /// Error to throw when configured to throw
     var errorToThrow: Error = MockWebOSClientError.connectionFailed("Mock error")
@@ -106,6 +109,7 @@ final class MockWebOSClient: WebOSClientProtocol {
         sendCommandCalls.append((command: command, timestamp: Date()))
         
         if shouldThrowOnSendCommand {
+            transitionToErrorIfNeeded(errorToThrow)
             throw errorToThrow
         }
         
@@ -129,11 +133,13 @@ final class MockWebOSClient: WebOSClientProtocol {
             case .success(let status):
                 return status
             case .failure(let error):
+                transitionToErrorIfNeeded(error)
                 throw error
             }
         }
 
         if shouldThrowOnSendCommand {
+            transitionToErrorIfNeeded(errorToThrow)
             throw errorToThrow
         }
 
@@ -179,6 +185,7 @@ final class MockWebOSClient: WebOSClientProtocol {
         
         shouldThrowOnConnect = false
         shouldThrowOnSendCommand = false
+        transitionToErrorOnCommandFailure = false
         errorToThrow = MockWebOSClientError.connectionFailed("Mock error")
         connectResults.removeAll()
         powerStatusResults.removeAll()
@@ -212,6 +219,12 @@ final class MockWebOSClient: WebOSClientProtocol {
 
     var getPowerStatusCallCount: Int {
         return getPowerStatusCalls.count
+    }
+
+    private func transitionToErrorIfNeeded(_ error: Error) {
+        guard transitionToErrorOnCommandFailure else { return }
+        mockConnectionState = .error(error)
+        stateChangeCallback?(.error(error))
     }
     
     /// Get timestamp of most recent connect call

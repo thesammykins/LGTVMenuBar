@@ -147,6 +147,7 @@ public final class TVController: TVControllerProtocol {
         case alreadyAwake
         case screenOnSent
         case needsPowerOn
+        case connectionLost
         case skipped
     }
     
@@ -355,7 +356,7 @@ public final class TVController: TVControllerProtocol {
                     await performPostWakeActions(for: config)
                     return
                 }
-                if outcome != .needsPowerOn {
+                if outcome != .needsPowerOn && outcome != .connectionLost {
                     return
                 }
             }
@@ -864,6 +865,11 @@ public final class TVController: TVControllerProtocol {
         } catch {
             logger.warning("Failed to query TV power state: \(error.localizedDescription)")
             logDiagnostic(level: "warning", category: "TVController", message: "Failed to query TV power state - sending screen on", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+            if !webOSClient.connectionState.isConnected {
+                syncConnectionStateFromWebOSClient()
+                logDiagnostic(level: "info", category: "TVController", message: "TV connection lost during power check - wake reconnect required", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+                return .connectionLost
+            }
             return await turnScreenOnAfterPowerCheck(reason: reason, config: config, powerStatus: nil)
         }
     }
@@ -882,6 +888,11 @@ public final class TVController: TVControllerProtocol {
         } catch {
             logger.warning("Failed to turn TV screen on: \(error.localizedDescription)")
             logDiagnostic(level: "warning", category: "TVController", message: "Failed to turn TV screen on", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+            if !webOSClient.connectionState.isConnected {
+                syncConnectionStateFromWebOSClient()
+                logDiagnostic(level: "info", category: "TVController", message: "TV connection lost during screen-on - wake reconnect required", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
+                return .connectionLost
+            }
             return .skipped
         }
     }
@@ -1014,6 +1025,17 @@ public final class TVController: TVControllerProtocol {
         diagnosticLogger.log(level: level, category: category, message: message, metadata: metadata)
     }
 
+    private var isWebOSConnectionReady: Bool {
+        connectionState.isConnected && webOSClient.connectionState.isConnected
+    }
+
+    private func syncConnectionStateFromWebOSClient() {
+        let clientState = webOSClient.connectionState
+        if connectionState != clientState {
+            connectionState = clientState
+        }
+    }
+
     private func appIdentityMetadata() -> [String: String] {
         var metadata: [String: String] = [:]
         metadata["bundleIdentifier"] = Bundle.main.bundleIdentifier ?? "unknown"
@@ -1113,28 +1135,27 @@ public final class TVController: TVControllerProtocol {
     }
 
     private func requestDeviceDetailsCommands() async {
-        do {
-            try await webOSClient.sendCommand(.getCurrentForegroundAppInfo)
-        } catch {
-            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request foreground app info", metadata: ["error": error.localizedDescription])
+        guard await requestDeviceDetailCommand(.getCurrentForegroundAppInfo, failureMessage: "Failed to request foreground app info") else { return }
+        guard await requestDeviceDetailCommand(.getInputList, failureMessage: "Failed to request input list") else { return }
+        guard await requestDeviceDetailCommand(.getSoundOutput, failureMessage: "Failed to request sound output") else { return }
+        _ = await requestDeviceDetailCommand(.getVolume, failureMessage: "Failed to request volume")
+    }
+
+    private func requestDeviceDetailCommand(_ command: WebOSCommand, failureMessage: String) async -> Bool {
+        guard isWebOSConnectionReady else {
+            syncConnectionStateFromWebOSClient()
+            return false
         }
 
         do {
-            try await webOSClient.sendCommand(.getInputList)
+            try await webOSClient.sendCommand(command)
+            return true
         } catch {
-            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request input list", metadata: ["error": error.localizedDescription])
-        }
-
-        do {
-            try await webOSClient.sendCommand(.getSoundOutput)
-        } catch {
-            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request sound output", metadata: ["error": error.localizedDescription])
-        }
-
-        do {
-            try await webOSClient.sendCommand(.getVolume)
-        } catch {
-            logDiagnostic(level: "warning", category: "TVController", message: "Failed to request volume", metadata: ["error": error.localizedDescription])
+            if !webOSClient.connectionState.isConnected {
+                syncConnectionStateFromWebOSClient()
+            }
+            logDiagnostic(level: "warning", category: "TVController", message: failureMessage, metadata: ["error": error.localizedDescription])
+            return false
         }
     }
 }

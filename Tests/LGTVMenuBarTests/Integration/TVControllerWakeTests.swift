@@ -360,6 +360,111 @@ struct TVControllerWakeTests {
         #expect(mockWebOS.sendCommandCalls.contains { if case .setInput = $0.command { return true }; return false })
     }
 
+    @Test("stale connected state triggers wake reconnect")
+    func staleConnectedStateTriggersWakeReconnect() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(10),
+            wakeConnectRetryDelay: .milliseconds(10),
+            wakeConnectMaxAttempts: 3
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+        try await controller.connect()
+        await waitUntil {
+            controller.connectionState.isConnected
+        }
+
+        mockWebOS.transitionToErrorOnCommandFailure = true
+        mockWebOS.powerStatusResults = [
+            .failure(MockWebOSClientError.connectionFailed("connection lost")),
+            .success(TVPowerStatus(state: "Screen Off"))
+        ]
+
+        mockPowerManager.simulateWakeEvent()
+
+        await waitUntil {
+            mockWOL.wakeCalls.count == 1 &&
+            mockWebOS.connectCallCount == 2 &&
+            mockWebOS.getPowerStatusCallCount == 2 &&
+            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
+        }
+
+        #expect(mockWOL.wakeCalls.count == 1)
+        #expect(mockWebOS.disconnectCallCount == 1)
+        #expect(mockWebOS.connectCallCount == 2)
+        #expect(mockWebOS.getPowerStatusCallCount == 2)
+        #expect(mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
+    }
+
+    @Test("device details capture stops after lost connection")
+    func deviceDetailsCaptureStopsAfterLostConnection() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(10),
+            wakeConnectRetryDelay: .milliseconds(10),
+            wakeConnectMaxAttempts: 3
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+        try await controller.connect()
+        await waitUntil {
+            controller.connectionState.isConnected
+        }
+
+        let sendCountBeforeCapture = mockWebOS.sendCommandCallCount
+        mockWebOS.transitionToErrorOnCommandFailure = true
+        mockWebOS.shouldThrowOnSendCommand = true
+        mockWebOS.errorToThrow = MockWebOSClientError.connectionFailed("connection lost")
+
+        let didStartCapture = await controller.gatherDeviceDetails()
+
+        #expect(didStartCapture)
+        #expect(mockWebOS.sendCommandCallCount == sendCountBeforeCapture + 1)
+        #expect(controller.connectionState.hasError)
+        #expect(mockDiagnostic.wasLogged(message: "Failed to request foreground app info"))
+    }
+
     @Test("wake flow ignores duplicate wake events while in progress")
     func wakeFlowIgnoresDuplicateWakeEventsWhileInProgress() async throws {
         let mockPowerManager = MockPowerManager()

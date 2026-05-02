@@ -11,7 +11,7 @@
     <key>CFBundleDisplayName</key>
     <string>LGTV Menu Bar</string>
 	<key>CFBundleVersion</key>
-	<string>12</string>
+	<string>13</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.4.0</string>
     <key>LSUIElement</key>

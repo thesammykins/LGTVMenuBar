@@ -311,6 +311,28 @@ final class WebOSClient: WebOSClientProtocol {
         
         logger.info("\("Disconnected from TV", privacy: .public)")
     }
+
+    private func handleConnectionFailure(_ error: Error) {
+        logger.warning("Invalidating WebOS connection after transport failure: \(error.localizedDescription, privacy: .public)")
+
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        handshakeCompleted = false
+        failHandshake(error)
+
+        let requestsToFail = pendingRequests
+        pendingRequests.removeAll()
+        for (_, continuation) in requestsToFail {
+            continuation.resume(throwing: error)
+        }
+
+        let shouldNotify = !_connectionState.hasError
+        _connectionState = .error(error)
+        if shouldNotify {
+            stateChangeCallback?(.error(error))
+            testStateChangeObserver?(.error(error))
+        }
+    }
     
     /// Send a command to the TV
     /// - Parameter command: Command to send
@@ -325,7 +347,9 @@ final class WebOSClient: WebOSClientProtocol {
                 try await testSendCommandHandler(command)
                 return
             } catch {
-                throw LGTVError.webosError("Failed to send command: \(error.localizedDescription)")
+                let sendError = LGTVError.webosError("Failed to send command: \(error.localizedDescription)")
+                handleConnectionFailure(sendError)
+                throw sendError
             }
         }
         
@@ -337,20 +361,31 @@ final class WebOSClient: WebOSClientProtocol {
             let string = String(data: data, encoding: .utf8)!
 
             guard let webSocketTask else {
-                throw LGTVError.webosError("WebSocket connection is unavailable")
+                let error = LGTVError.webosError("WebSocket connection is unavailable")
+                handleConnectionFailure(error)
+                throw error
             }
 
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                webSocketTask.send(.string(string)) { error in
+                webSocketTask.send(.string(string)) { [weak self] error in
                     if let error {
-                        self.logger.error("Failed to send command: \(error.localizedDescription, privacy: .public)")
-                        continuation.resume(throwing: error)
+                        Task { @MainActor [weak self] in
+                            guard let self else {
+                                continuation.resume(throwing: error)
+                                return
+                            }
+                            self.logger.error("Failed to send command: \(error.localizedDescription, privacy: .public)")
+                            self.handleConnectionFailure(error)
+                            continuation.resume(throwing: error)
+                        }
                     } else {
                         continuation.resume()
                     }
                 }
             }
             
+        } catch let error as LGTVError {
+            throw error
         } catch {
             throw LGTVError.webosError("Failed to send command: \(error.localizedDescription)")
         }
@@ -508,12 +543,8 @@ final class WebOSClient: WebOSClientProtocol {
             } catch {
                 logger.error("Error receiving message: \(error.localizedDescription, privacy: .public)")
 
-                failHandshake(error)
-                
                 if _connectionState != .disconnected {
-                    _connectionState = .error(error)
-                    stateChangeCallback?(.error(error))
-                    testStateChangeObserver?(.error(error))
+                    handleConnectionFailure(error)
                 }
                 break
             }
@@ -810,8 +841,13 @@ final class WebOSClient: WebOSClientProtocol {
         }
 
         if let testSendCommandHandler {
-            try await testSendCommandHandler(.getPowerState)
-            return TVPowerStatus()
+            do {
+                try await testSendCommandHandler(.getPowerState)
+                return TVPowerStatus()
+            } catch {
+                handleConnectionFailure(error)
+                throw error
+            }
         }
 
         let messageDict = try createCommandMessage(.getPowerState)
@@ -823,7 +859,9 @@ final class WebOSClient: WebOSClientProtocol {
         let string = String(data: data, encoding: .utf8)!
 
         guard let webSocketTask else {
-            throw LGTVError.webosError("WebSocket connection is unavailable")
+            let error = LGTVError.webosError("WebSocket connection is unavailable")
+            handleConnectionFailure(error)
+            throw error
         }
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -836,7 +874,10 @@ final class WebOSClient: WebOSClientProtocol {
                     guard let self else { return }
                     if let pendingRequest = self.pendingRequests.removeValue(forKey: requestID) {
                         self.logger.error("Failed to send awaited command: \(error.localizedDescription, privacy: .public)")
+                        self.handleConnectionFailure(error)
                         pendingRequest.resume(throwing: error)
+                    } else {
+                        self.handleConnectionFailure(error)
                     }
                 }
             }
