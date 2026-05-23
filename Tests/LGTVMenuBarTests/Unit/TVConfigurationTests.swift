@@ -60,6 +60,9 @@ struct TVConfigurationTests {
         #expect(config.sleepWithMac == true)
         #expect(config.switchInputOnWake == false)
         #expect(config.enablePCMode == false)
+        #expect(config.wakeBroadcastAddress == nil)
+        #expect(config.wakePort == nil)
+        #expect(config.wakeTimeoutSeconds == nil)
     }
     
     // MARK: - Codable Tests
@@ -104,7 +107,10 @@ struct TVConfigurationTests {
             "wakeWithMac": false,
             "sleepWithMac": false,
             "switchInputOnWake": true,
-            "enablePCMode": true
+            "enablePCMode": true,
+            "wakeBroadcastAddress": "192.168.88.255",
+            "wakePort": 7,
+            "wakeTimeoutSeconds": 120
         }
         """
         
@@ -122,6 +128,36 @@ struct TVConfigurationTests {
         #expect(config.sleepWithMac == false)
         #expect(config.switchInputOnWake == true)
         #expect(config.enablePCMode == true)
+        #expect(config.wakeBroadcastAddress == "192.168.88.255")
+        #expect(config.wakePort == 7)
+        #expect(config.wakeTimeoutSeconds == 120)
+    }
+
+    @Test("decodes old JSON without wake reliability settings")
+    func decodesOldJSONWithoutWakeReliabilitySettings() throws {
+        let id = UUID()
+        let json = """
+        {
+            "id": "\(id.uuidString)",
+            "name": "Bedroom TV",
+            "ipAddress": "192.168.1.200",
+            "macAddress": "11:22:33:44:55:66",
+            "preferredInput": "HDMI_3",
+            "autoConnectOnLaunch": false,
+            "wakeWithMac": false,
+            "sleepWithMac": false,
+            "switchInputOnWake": true,
+            "enablePCMode": true
+        }
+        """
+
+        let data = json.data(using: .utf8)!
+        let config = try JSONDecoder().decode(TVConfiguration.self, from: data)
+
+        #expect(config.id == id)
+        #expect(config.wakeBroadcastAddress == nil)
+        #expect(config.wakePort == nil)
+        #expect(config.wakeTimeoutSeconds == nil)
     }
     
     @Test("round-trip encode/decode preserves data")

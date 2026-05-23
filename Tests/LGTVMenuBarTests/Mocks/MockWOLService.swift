@@ -17,6 +17,9 @@ final class MockWOLService: WOLServiceProtocol, @unchecked Sendable {
     
     /// Whether wake operation should succeed
     var shouldSucceedWake = true
+
+    /// Diagnostics metadata returned by wakeDiagnostics(for:)
+    var wakeDiagnosticsMetadata: [String: String] = [:]
     
     // MARK: - Call History
     
@@ -49,6 +52,10 @@ final class MockWOLService: WOLServiceProtocol, @unchecked Sendable {
             try await Task.sleep(for: .seconds(wakeDelay))
         }
     }
+
+    func wakeDiagnostics(for configuration: TVConfiguration) -> [String: String] {
+        wakeDiagnosticsMetadata
+    }
     
     // MARK: - Test Helpers
     
@@ -61,6 +68,7 @@ final class MockWOLService: WOLServiceProtocol, @unchecked Sendable {
         shouldSucceedWake = true
         errorToThrow = LGTVError.wolError(NSError(domain: "MockWOL", code: -1))
         wakeDelay = 0.0
+        wakeDiagnosticsMetadata.removeAll()
     }
     
     /// Get the number of times wake was called for a specific MAC address

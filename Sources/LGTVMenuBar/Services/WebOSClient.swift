@@ -49,6 +49,9 @@ final class WebOSClient: WebOSClientProtocol {
     
     /// Current connection state
     private var _connectionState = ConnectionState.disconnected
+
+    /// Monotonic token used to ignore callbacks from stale socket attempts.
+    private var connectionAttemptID: UInt64 = 0
     
     /// TV configuration
     private var configuration: TVConfiguration?
@@ -139,6 +142,15 @@ final class WebOSClient: WebOSClientProtocol {
     internal func handleMessageForTesting(_ string: String) async {
         await handleMessage(string)
     }
+
+    @discardableResult
+    internal func beginConnectionAttemptForTesting() -> UInt64 {
+        beginConnectionAttempt()
+    }
+
+    internal func emitConnectionStateForTesting(_ state: ConnectionState, attemptID: UInt64) {
+        publishConnectionState(state, attemptID: attemptID)
+    }
     
     deinit {
         _connectionState = .disconnected
@@ -162,6 +174,7 @@ final class WebOSClient: WebOSClientProtocol {
         // Clean up any existing connection state before reconnecting (e.g., recovering from error state)
         if _connectionState != .disconnected {
             logger.info("Cleaning up previous connection state before reconnecting")
+            _ = beginConnectionAttempt()
             webSocketTask?.cancel()
             webSocketTask = nil
             handshakeCompleted = false
@@ -177,18 +190,16 @@ final class WebOSClient: WebOSClientProtocol {
         
         self.configuration = configuration
         self.stateChangeCallback = stateChangeCallback
-        self._connectionState = .connecting
-        
-        stateChangeCallback(.connecting)
-        testStateChangeObserver?(.connecting)
         
         // Connection strategy: Try SSL first (required for 2022+ TVs), fallback to non-SSL
         var lastError: Error?
         
         // Try SSL connection (wss:// on port 3001)
+        let sslAttemptID = beginConnectionAttempt()
+        publishConnectionState(.connecting, attemptID: sslAttemptID)
         do {
             logger.debug("Attempting SSL connection on port 3001")
-            try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: true)
+            try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: true, attemptID: sslAttemptID)
             self.usesSSL = true
             logger.info("\("Successfully connected via SSL", privacy: .public) to \(configuration.name)")
             return
@@ -199,13 +210,15 @@ final class WebOSClient: WebOSClientProtocol {
             webSocketTask?.cancel()
             webSocketTask = nil
             handshakeCompleted = false
-            failHandshake(error)
+            failHandshake(error, attemptID: sslAttemptID)
         }
         
         // Try non-SSL connection (ws:// on port 3000)
+        let nonSSLAttemptID = beginConnectionAttempt()
+        publishConnectionState(.connecting, attemptID: nonSSLAttemptID)
         do {
             logger.debug("Attempting non-SSL connection on port 3000")
-            try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: false)
+            try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: false, attemptID: nonSSLAttemptID)
             self.usesSSL = false
             logger.info("\("Successfully connected via non-SSL", privacy: .public) to \(configuration.name)")
             return
@@ -215,8 +228,7 @@ final class WebOSClient: WebOSClientProtocol {
         }
         
         // Both connection attempts failed
-        self._connectionState = .disconnected
-        stateChangeCallback(.disconnected)
+        publishConnectionState(.disconnected, attemptID: nonSSLAttemptID)
         throw LGTVError.webosError("Failed to connect to TV: \(lastError?.localizedDescription ?? "Unknown error")")
     }
     
@@ -225,7 +237,7 @@ final class WebOSClient: WebOSClientProtocol {
     ///   - ipAddress: IP address of the TV
     ///   - useSSL: Whether to use SSL (wss://) or not (ws://)
     /// - Throws: `LGTVError.webosError` if connection fails
-    private func connectWithProtocol(ipAddress: String, useSSL: Bool) async throws {
+    private func connectWithProtocol(ipAddress: String, useSSL: Bool, attemptID: UInt64) async throws {
         let port = useSSL ? 3001 : 3000
         let scheme = useSSL ? "wss" : "ws"
         
@@ -239,17 +251,15 @@ final class WebOSClient: WebOSClientProtocol {
         webSocketTask?.resume()
         
         // Start message handling
-        Task {
-            await handleMessages()
+        Task { [attemptID] in
+            await handleMessages(attemptID: attemptID)
         }
 
-        _connectionState = .registering
-        stateChangeCallback?(.registering)
-        testStateChangeObserver?(.registering)
+        publishConnectionState(.registering, attemptID: attemptID)
         
         // Perform handshake with timeout
         try await withTimeout(connectionTimeout) {
-            try await self.performHandshake()
+            try await self.performHandshake(attemptID: attemptID)
         }
     }
     
@@ -286,6 +296,7 @@ final class WebOSClient: WebOSClientProtocol {
     
     /// Disconnect from the TV
     func disconnect() {
+        let attemptID = beginConnectionAttempt()
         guard _connectionState != .disconnected else {
             return
         }
@@ -295,9 +306,8 @@ final class WebOSClient: WebOSClientProtocol {
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
 
-        failHandshake(LGTVError.webosError("Connection closed"))
+        failHandshake(LGTVError.webosError("Connection closed"), attemptID: attemptID)
         
-        _connectionState = .disconnected
         handshakeCompleted = false
         
         // Fail all pending requests
@@ -306,19 +316,23 @@ final class WebOSClient: WebOSClientProtocol {
         }
         pendingRequests.removeAll()
         
-        stateChangeCallback?(.disconnected)
-        testStateChangeObserver?(.disconnected)
+        publishConnectionState(.disconnected, attemptID: attemptID)
         
         logger.info("\("Disconnected from TV", privacy: .public)")
     }
 
-    private func handleConnectionFailure(_ error: Error) {
+    private func handleConnectionFailure(_ error: Error, attemptID: UInt64? = nil) {
+        guard isCurrentConnectionAttempt(attemptID) else {
+            logger.debug("Ignoring stale WebOS connection failure")
+            return
+        }
+
         logger.warning("Invalidating WebOS connection after transport failure: \(error.localizedDescription, privacy: .public)")
 
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         handshakeCompleted = false
-        failHandshake(error)
+        failHandshake(error, attemptID: attemptID)
 
         let requestsToFail = pendingRequests
         pendingRequests.removeAll()
@@ -327,10 +341,10 @@ final class WebOSClient: WebOSClientProtocol {
         }
 
         let shouldNotify = !_connectionState.hasError
-        _connectionState = .error(error)
         if shouldNotify {
-            stateChangeCallback?(.error(error))
-            testStateChangeObserver?(.error(error))
+            publishConnectionState(.error(error), attemptID: attemptID)
+        } else {
+            _connectionState = .error(error)
         }
     }
     
@@ -430,9 +444,35 @@ final class WebOSClient: WebOSClientProtocol {
     }
     
     // MARK: - Private Methods
+
+    @discardableResult
+    private func beginConnectionAttempt() -> UInt64 {
+        connectionAttemptID &+= 1
+        return connectionAttemptID
+    }
+
+    private func isCurrentConnectionAttempt(_ attemptID: UInt64?) -> Bool {
+        guard let attemptID else { return true }
+        return attemptID == connectionAttemptID
+    }
+
+    private func publishConnectionState(_ state: ConnectionState, attemptID: UInt64? = nil) {
+        guard isCurrentConnectionAttempt(attemptID) else {
+            logger.debug("Ignoring stale WebOS state change")
+            return
+        }
+
+        _connectionState = state
+        stateChangeCallback?(state)
+        testStateChangeObserver?(state)
+    }
     
     /// Perform handshake with the TV
-    private func performHandshake() async throws {
+    private func performHandshake(attemptID: UInt64) async throws {
+        guard isCurrentConnectionAttempt(attemptID) else {
+            throw LGTVError.webosError("Connection attempt superseded")
+        }
+
         logger.debug("Performing handshake")
         
         // Check if we have a stored client key for this TV
@@ -505,7 +545,7 @@ final class WebOSClient: WebOSClientProtocol {
             self.handshakeContinuation = continuation
 
             guard let webSocketTask else {
-                self.failHandshake(LGTVError.webosError("WebSocket connection is unavailable"))
+                self.failHandshake(LGTVError.webosError("WebSocket connection is unavailable"), attemptID: attemptID)
                 return
             }
 
@@ -513,7 +553,7 @@ final class WebOSClient: WebOSClientProtocol {
                 guard let self, let error else { return }
 
                 Task { @MainActor in
-                    self.failHandshake(error)
+                    self.failHandshake(error, attemptID: attemptID)
                 }
             }
         }
@@ -522,17 +562,17 @@ final class WebOSClient: WebOSClientProtocol {
     }
     
     /// Handle incoming WebSocket messages
-    private func handleMessages() async {
-        while _connectionState == .connecting || _connectionState == .registering || _connectionState == .connected {
+    private func handleMessages(attemptID: UInt64) async {
+        while isCurrentConnectionAttempt(attemptID) && (_connectionState == .connecting || _connectionState == .registering || _connectionState == .connected) {
             do {
                 let message = try await webSocketTask?.receive()
                 
                 switch message {
                 case .string(let string):
-                    await handleMessage(string)
+                    await handleMessage(string, attemptID: attemptID)
                 case .data(let data):
                     if let string = String(data: data, encoding: .utf8) {
-                        await handleMessage(string)
+                        await handleMessage(string, attemptID: attemptID)
                     }
                 case .none:
                     break
@@ -543,8 +583,8 @@ final class WebOSClient: WebOSClientProtocol {
             } catch {
                 logger.error("Error receiving message: \(error.localizedDescription, privacy: .public)")
 
-                if _connectionState != .disconnected {
-                    handleConnectionFailure(error)
+                if isCurrentConnectionAttempt(attemptID) && _connectionState != .disconnected {
+                    handleConnectionFailure(error, attemptID: attemptID)
                 }
                 break
             }
@@ -552,7 +592,12 @@ final class WebOSClient: WebOSClientProtocol {
     }
     
     /// Handle a received message
-    private func handleMessage(_ string: String) async {
+    private func handleMessage(_ string: String, attemptID: UInt64? = nil) async {
+        guard isCurrentConnectionAttempt(attemptID) else {
+            logger.debug("Ignoring stale WebOS message")
+            return
+        }
+
         guard let data = string.data(using: .utf8),
               let messageDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             logger.warning("Failed to decode message: \(string)")
@@ -564,7 +609,7 @@ final class WebOSClient: WebOSClientProtocol {
         
         switch messageType {
         case "registered":
-            await handleRegisteredMessage(messageDict)
+            await handleRegisteredMessage(messageDict, attemptID: attemptID)
         case "response":
             await handleResponseMessage(messageDict)
         case "push":
@@ -575,13 +620,16 @@ final class WebOSClient: WebOSClientProtocol {
     }
     
     /// Handle registered message
-    private func handleRegisteredMessage(_ messageDict: [String: Any]) async {
+    private func handleRegisteredMessage(_ messageDict: [String: Any], attemptID: UInt64? = nil) async {
+        guard isCurrentConnectionAttempt(attemptID) else {
+            logger.debug("Ignoring stale WebOS registered message")
+            return
+        }
+
         logger.info("\("Successfully registered with TV", privacy: .public)")
 
         handshakeCompleted = true
-        _connectionState = .connected
-        stateChangeCallback?(.connected)
-        testStateChangeObserver?(.connected)
+        publishConnectionState(.connected, attemptID: attemptID)
 
         if let handshakeContinuation {
             self.handshakeContinuation = nil
@@ -913,7 +961,8 @@ final class WebOSClient: WebOSClientProtocol {
         }
     }
 
-    private func failHandshake(_ error: Error) {
+    private func failHandshake(_ error: Error, attemptID: UInt64? = nil) {
+        guard isCurrentConnectionAttempt(attemptID) else { return }
         guard let handshakeContinuation else { return }
         self.handshakeContinuation = nil
         handshakeContinuation.resume(throwing: error)

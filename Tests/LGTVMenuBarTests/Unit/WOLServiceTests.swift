@@ -43,6 +43,65 @@ struct WOLServiceTests {
         let error = WOLError.broadcastFailed
         #expect(error.errorDescription?.contains("Failed to broadcast wake packet") == true)
     }
+
+    @Test("WOLService fans out auto targets across limited and subnet broadcasts")
+    func wolServiceFansOutAutoTargets() async throws {
+        var sentTargets: [WOLTarget] = []
+        let service = WOLService(
+            interfaceProvider: {
+                [
+                    NetworkInterfaceSnapshot(
+                        name: "en11",
+                        address: "192.168.88.117",
+                        netmask: "255.255.255.0",
+                        broadcastAddress: "192.168.88.255"
+                    )
+                ]
+            },
+            packetSender: { _, target in
+                sentTargets.append(target)
+            }
+        )
+        let config = TVConfiguration(
+            name: "LG C2",
+            ipAddress: "192.168.88.56",
+            macAddress: "4C:BA:D7:4F:5D:A8"
+        )
+
+        try await service.sendWakeRequest(to: config)
+
+        let uniqueDestinations = Set(sentTargets.map { "\($0.host):\($0.port)" })
+        #expect(uniqueDestinations == [
+            "255.255.255.255:9",
+            "255.255.255.255:7",
+            "192.168.88.255:9",
+            "192.168.88.255:7"
+        ])
+        #expect(sentTargets.count == uniqueDestinations.count * 3)
+    }
+
+    @Test("WOLService honors explicit wake broadcast and port")
+    func wolServiceHonorsExplicitWakeTarget() async throws {
+        var sentTargets: [WOLTarget] = []
+        let service = WOLService(
+            interfaceProvider: { [] },
+            packetSender: { _, target in
+                sentTargets.append(target)
+            }
+        )
+        let config = TVConfiguration(
+            name: "LG C2",
+            ipAddress: "192.168.88.56",
+            macAddress: "4C:BA:D7:4F:5D:A8",
+            wakeBroadcastAddress: "192.168.88.255",
+            wakePort: 9
+        )
+
+        try await service.sendWakeRequest(to: config)
+
+        #expect(Set(sentTargets) == Set([WOLTarget(host: "192.168.88.255", port: 9, interfaceName: nil)]))
+        #expect(sentTargets.count == 3)
+    }
     
     @Test("WOLError conforms to Error protocol")
     func wolErrorConformsToError() {

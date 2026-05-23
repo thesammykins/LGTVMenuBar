@@ -121,24 +121,24 @@ struct DiagnosticLoggerTests {
     
     // MARK: - Ring Buffer Tests
     
-    @Test("Ring buffer drops oldest entry when exceeding 1000 entries")
+    @Test("Ring buffer drops oldest entry when exceeding 5000 entries")
     func ringBufferDropsOldestEntryWhenFull() {
         let logger = DiagnosticLogger()
         logger.enable()
         logger.setDebugMode(true)
         
-        // Add 1001 entries
-        for i in 0..<1001 {
+        // Add 5001 entries
+        for i in 0..<5001 {
             logger.log(level: "info", category: "test", message: "Message \(i)", metadata: nil)
         }
         
-        // Should maintain max 1000 entries
-        #expect(logger.entryCount == 1000)
+        // Should maintain max 5000 entries
+        #expect(logger.entryCount == 5000)
         
         // Verify oldest was dropped (first message should not appear)
         let plainText = logger.exportPlainText()
         #expect(!plainText.contains("Message 0"))
-        #expect(plainText.contains("Message 1000"))
+        #expect(plainText.contains("Message 5000"))
     }
     
     @Test("Ring buffer maintains FIFO behavior")
@@ -148,18 +148,18 @@ struct DiagnosticLoggerTests {
         logger.setDebugMode(true)
         
         // Fill to capacity
-        for i in 0..<1000 {
+        for i in 0..<5000 {
             logger.log(level: "info", category: "test", message: "Message \(i)", metadata: nil)
         }
         
         // Add one more - should drop Message 0
-        logger.log(level: "info", category: "test", message: "Message 1000", metadata: nil)
+        logger.log(level: "info", category: "test", message: "Message 5000", metadata: nil)
         
         let plainText = logger.exportPlainText()
         #expect(!plainText.contains("Message 0"))
         #expect(plainText.contains("Message 1"))
-        #expect(plainText.contains("Message 999"))
-        #expect(plainText.contains("Message 1000"))
+        #expect(plainText.contains("Message 4999"))
+        #expect(plainText.contains("Message 5000"))
     }
     
     @Test("Multiple rapid additions maintain buffer integrity")
@@ -169,18 +169,18 @@ struct DiagnosticLoggerTests {
         logger.setDebugMode(true)
         
         // Rapid addition beyond capacity
-        for i in 0..<2000 {
+        for i in 0..<10000 {
             logger.log(level: "info", category: "test", message: "Rapid \(i)", metadata: nil)
         }
         
-        // Should still maintain max 1000
-        #expect(logger.entryCount == 1000)
+        // Should still maintain max 5000
+        #expect(logger.entryCount == 5000)
         
         // Verify last entries are present
         let plainText = logger.exportPlainText()
-        #expect(plainText.contains("Rapid 1999"))
-        #expect(plainText.contains("Rapid 1500"))
-        #expect(!plainText.contains("Rapid 999"))
+        #expect(plainText.contains("Rapid 9999"))
+        #expect(plainText.contains("Rapid 7500"))
+        #expect(!plainText.contains("Rapid 4999"))
     }
     
     // MARK: - Level Filtering Tests
@@ -370,28 +370,28 @@ struct DiagnosticLoggerTests {
         #expect(plainText.contains("Entry Count: 0"))
     }
     
-    @Test("Export with full buffer 1000 entries works correctly")
+    @Test("Export with full buffer 5000 entries works correctly")
     func exportWithFullBufferWorksCorrectly() throws {
         let logger = DiagnosticLogger()
         logger.enable()
         logger.setDebugMode(true)
         
         // Fill buffer to capacity
-        for i in 0..<1000 {
+        for i in 0..<5000 {
             logger.log(level: "info", category: "test", message: "Message \(i)", metadata: nil)
         }
         
         // JSON export
         let jsonData = try logger.exportJSON()
         let json = try JSONSerialization.jsonObject(with: jsonData) as! [String: Any]
-        #expect(json["entry_count"] as? Int == 1000)
+        #expect(json["entry_count"] as? Int == 5000)
         
         let entries = json["entries"] as! [[String: Any]]
-        #expect(entries.count == 1000)
+        #expect(entries.count == 5000)
         
         // Plain text export
         let plainText = logger.exportPlainText()
-        #expect(plainText.contains("Entry Count: 1000"))
+        #expect(plainText.contains("Entry Count: 5000"))
     }
     
     // MARK: - Metadata Handling Tests

@@ -86,4 +86,24 @@ struct WebOSClientTests {
             try await client.sendCommand(.screenOn)
         }
     }
+
+    @Test("stale connection attempt state changes are ignored")
+    func staleConnectionAttemptStateChangesAreIgnored() async {
+        let client = WebOSClient(keychainManager: MockKeychainManager())
+        var observedStates: [ConnectionState] = []
+        client.setTestStateChangeObserver { state in
+            observedStates.append(state)
+        }
+
+        let staleAttempt = client.beginConnectionAttemptForTesting()
+        let currentAttempt = client.beginConnectionAttemptForTesting()
+
+        client.emitConnectionStateForTesting(.registering, attemptID: staleAttempt)
+        #expect(observedStates.isEmpty)
+        #expect(client.connectionState == .disconnected)
+
+        client.emitConnectionStateForTesting(.connecting, attemptID: currentAttempt)
+        #expect(observedStates == [.connecting])
+        #expect(client.connectionState == .connecting)
+    }
 }

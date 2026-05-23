@@ -21,7 +21,7 @@ final class DiagnosticLogger: DiagnosticLoggerProtocol {
     private(set) var isDebugMode: Bool = false
     
     private var entries: [LogEntry] = []
-    private let maxEntries = 1000
+    private let maxEntries = 5000
     private let entryLifetime: TimeInterval = 24 * 60 * 60 // 24 hours
     
     var entryCount: Int {

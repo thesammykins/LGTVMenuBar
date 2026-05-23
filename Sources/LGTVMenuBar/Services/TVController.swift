@@ -120,6 +120,7 @@ public final class TVController: TVControllerProtocol {
     private var diagnosticCaptureUntil: Date?
     private var diagnosticCaptureRestoreState: (enabled: Bool, debug: Bool)?
     private var diagnosticCaptureTimer: Timer?
+    private var lastPeriodicSnapshotMetadata: [String: String]?
     
     // MARK: - Debouncing
     /// Prevent overlapping wake sequences while a previous wake is still running.
@@ -140,8 +141,8 @@ public final class TVController: TVControllerProtocol {
     /// Maximum number of reconnect attempts after wake.
     private let wakeConnectMaxAttempts: Int
 
-    /// Maximum number of Wake-on-LAN send attempts for one recovery sequence.
-    private let wakePacketMaxAttempts = 3
+    /// Maximum time spent polling WebOS after Wake-on-LAN before giving up.
+    private let wakeConnectTimeout: Duration
 
     private enum ScreenRecoveryOutcome: Equatable {
         case alreadyAwake
@@ -163,7 +164,8 @@ public final class TVController: TVControllerProtocol {
         diagnosticLogger: DiagnosticLoggerProtocol,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
-        wakeConnectMaxAttempts: Int = 3
+        wakeConnectMaxAttempts: Int = 45,
+        wakeConnectTimeout: Duration = .seconds(90)
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -175,6 +177,7 @@ public final class TVController: TVControllerProtocol {
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
         self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
+        self.wakeConnectTimeout = wakeConnectTimeout
         
         setupCallbacks()
         loadConfiguration()
@@ -196,7 +199,8 @@ public final class TVController: TVControllerProtocol {
         arylicClient: ArylicVolumeClientProtocol?,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
-        wakeConnectMaxAttempts: Int = 3
+        wakeConnectMaxAttempts: Int = 45,
+        wakeConnectTimeout: Duration = .seconds(90)
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -209,6 +213,7 @@ public final class TVController: TVControllerProtocol {
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
         self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
+        self.wakeConnectTimeout = wakeConnectTimeout
         
         setupCallbacks()
         loadConfiguration()
@@ -319,7 +324,7 @@ public final class TVController: TVControllerProtocol {
         
         logger.info("Sending WOL to \(config.name)")
         logDiagnostic(level: "info", category: "TVController", message: "Sending Wake-on-LAN", metadata: tvIdentityMetadata(for: config))
-        try await wolService.sendWakeOnLAN(macAddress: config.macAddress)
+        try await wolService.sendWakeRequest(to: config)
         logDiagnostic(level: "info", category: "TVController", message: "Wake-on-LAN packets sent", metadata: tvIdentityMetadata(for: config))
     }
 
@@ -362,8 +367,9 @@ public final class TVController: TVControllerProtocol {
             }
 
             disconnect()
-            try await sendWakePacketsWithRetries(config: config, reason: reason)
-            try await connectAfterWake(reason: reason)
+            logWakeDiagnostics(reason: reason, config: config)
+            try await sendWakePackets(config: config, reason: reason)
+            try await connectAfterWake(reason: reason, config: config)
 
             let outcome = await ensureConnectedScreenIsOn(reason: reason, config: config)
             if outcome == .skipped || outcome == .needsPowerOn {
@@ -788,50 +794,64 @@ public final class TVController: TVControllerProtocol {
     }
     #endif
     
-    private func sendWakePacketsWithRetries(config: TVConfiguration, reason: String) async throws {
-        var lastError: Error?
-
-        for attempt in 1...wakePacketMaxAttempts {
-            do {
-                logDiagnostic(level: "info", category: "TVController", message: "Wake-on-LAN attempt", metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "\(attempt)"]))
-                try await wake()
-                return
-            } catch {
-                lastError = error
-                logger.warning("Wake-on-LAN attempt \(attempt) failed: \(error.localizedDescription)")
-                logDiagnostic(level: "warning", category: "TVController", message: "Wake-on-LAN attempt failed", metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "\(attempt)", "error": error.localizedDescription]))
-                if attempt < wakePacketMaxAttempts {
-                    try? await Task.sleep(for: wakeConnectRetryDelay)
-                }
-            }
+    private func sendWakePackets(config: TVConfiguration, reason: String) async throws {
+        do {
+            logDiagnostic(level: "info", category: "TVController", message: "Wake-on-LAN attempt", metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "1"]))
+            try await wake()
+        } catch {
+            logger.warning("Wake-on-LAN failed: \(error.localizedDescription)")
+            logDiagnostic(level: "warning", category: "TVController", message: "Wake-on-LAN attempt failed", metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "1", "error": error.localizedDescription]))
+            throw error
         }
-
-        throw lastError ?? LGTVError.wolError(WOLError.broadcastFailed)
     }
 
-    private func connectAfterWake(reason: String) async throws {
+    private func connectAfterWake(reason: String, config: TVConfiguration) async throws {
         var lastError: Error?
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let timeout = wakeTimeout(for: config)
+        let deadline = startedAt.advanced(by: timeout)
+        var attempt = 1
 
-        for attempt in 1...wakeConnectMaxAttempts {
+        while attempt <= wakeConnectMaxAttempts && clock.now < deadline {
             if attempt == 1 {
                 try? await Task.sleep(for: wakeConnectInitialDelay)
             } else {
                 try? await Task.sleep(for: wakeConnectRetryDelay)
             }
 
+            let elapsedSeconds = durationSecondsString(startedAt.duration(to: clock.now))
+            let timeoutSeconds = durationSecondsString(timeout)
+            let metadata = wakeMetadata(
+                reason: reason,
+                config: config,
+                additional: [
+                    "attempt": "\(attempt)",
+                    "elapsedSeconds": elapsedSeconds,
+                    "wakeTimeoutSeconds": timeoutSeconds
+                ]
+            )
+
             do {
                 logger.info("Wake reconnect attempt \(attempt)")
-                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: ["attempt": "\(attempt)", "reason": reason])
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: metadata)
                 try await connect()
                 logger.info("Wake reconnect succeeded on attempt \(attempt)")
-                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: ["attempt": "\(attempt)", "reason": reason])
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: metadata)
                 return
             } catch {
                 lastError = error
                 logger.warning("Wake reconnect attempt \(attempt) failed: \(error.localizedDescription)")
-                logDiagnostic(level: "warning", category: "TVController", message: "Wake reconnect attempt failed", metadata: ["attempt": "\(attempt)", "reason": reason, "error": error.localizedDescription])
+                logDiagnostic(level: "warning", category: "TVController", message: "Wake reconnect attempt failed", metadata: wakeMetadata(reason: reason, config: config, additional: [
+                    "attempt": "\(attempt)",
+                    "elapsedSeconds": elapsedSeconds,
+                    "wakeTimeoutSeconds": timeoutSeconds,
+                    "error": error.localizedDescription
+                ]))
                 disconnect()
             }
+
+            attempt += 1
         }
 
         throw lastError ?? LGTVError.webosError("Failed to reconnect after wake")
@@ -1060,6 +1080,27 @@ public final class TVController: TVControllerProtocol {
         return metadata
     }
 
+    private func logWakeDiagnostics(reason: String, config: TVConfiguration) {
+        var metadata = wakeMetadata(reason: reason, config: config)
+        metadata.merge(wolService.wakeDiagnostics(for: config)) { _, new in new }
+        metadata["requiredTVSettings"] = metadata["requiredTVSettings"] ?? "TV On With Mobile / Turn On via Wi-Fi enabled; LG Connect Apps/Mobile App enabled; Quick Start+/Always Ready may affect standby behavior"
+        metadata["networkStandbyLimit"] = metadata["networkStandbyLimit"] ?? "Cannot wake a TV from true deep-off, unplugged, or power-saving states without a standby network, CEC, or IR path"
+        logDiagnostic(level: "info", category: "TVController", message: "Wake diagnostics snapshot", metadata: metadata)
+    }
+
+    private func wakeTimeout(for config: TVConfiguration) -> Duration {
+        guard let configuredSeconds = config.wakeTimeoutSeconds, configuredSeconds > 0 else {
+            return wakeConnectTimeout
+        }
+        return .seconds(configuredSeconds)
+    }
+
+    private func durationSecondsString(_ duration: Duration) -> String {
+        let components = duration.components
+        let seconds = Double(components.seconds) + (Double(components.attoseconds) / 1_000_000_000_000_000_000)
+        return String(format: "%.1f", seconds)
+    }
+
     private func deviceDetailsMetadata() -> [String: String] {
         var metadata: [String: String] = [
             "connectionState": "\(connectionState)",
@@ -1122,12 +1163,20 @@ public final class TVController: TVControllerProtocol {
     }
 
     private func capturePeriodicDiagnostics() {
+        let metadata = deviceDetailsMetadata()
+
         guard connectionState.isConnected else {
-            logDiagnostic(level: "info", category: "TVController", message: "Skipped periodic capture - not connected", metadata: deviceDetailsMetadata())
+            if metadata != lastPeriodicSnapshotMetadata {
+                lastPeriodicSnapshotMetadata = metadata
+                logDiagnostic(level: "debug", category: "TVController", message: "Skipped periodic capture - not connected", metadata: metadata)
+            }
             return
         }
 
-        logDiagnostic(level: "info", category: "TVController", message: "Periodic device status snapshot", metadata: deviceDetailsMetadata())
+        if metadata != lastPeriodicSnapshotMetadata {
+            lastPeriodicSnapshotMetadata = metadata
+            logDiagnostic(level: "debug", category: "TVController", message: "Periodic device status snapshot", metadata: metadata)
+        }
 
         Task { @MainActor in
             await requestDeviceDetailsCommands()

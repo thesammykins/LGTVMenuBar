@@ -179,7 +179,10 @@ struct TVConfigurationTab: View {
             wakeWithMac: controller.configuration?.wakeWithMac ?? true,
             sleepWithMac: controller.configuration?.sleepWithMac ?? true,
             switchInputOnWake: controller.configuration?.switchInputOnWake ?? false,
-            enablePCMode: controller.configuration?.enablePCMode ?? false
+            enablePCMode: controller.configuration?.enablePCMode ?? false,
+            wakeBroadcastAddress: controller.configuration?.wakeBroadcastAddress,
+            wakePort: controller.configuration?.wakePort,
+            wakeTimeoutSeconds: controller.configuration?.wakeTimeoutSeconds
         )
         
         do {
@@ -215,6 +218,9 @@ struct AutomationTab: View {
     @State private var sleepWithMac: Bool = true
     @State private var switchInputOnWake: Bool = false
     @State private var enablePCMode: Bool = false
+    @State private var wakeBroadcastAddress: String = ""
+    @State private var wakePort: String = ""
+    @State private var wakeTimeoutSeconds: String = ""
     
     var body: some View {
         Form {
@@ -229,6 +235,22 @@ struct AutomationTab: View {
                     .help("Automatically turn off TV when your Mac goes to sleep")
             } header: {
                 Text("Power Sync")
+            }
+
+            Section {
+                TextField("Broadcast Address (Auto)", text: $wakeBroadcastAddress)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Optional subnet broadcast address, e.g. 192.168.88.255")
+
+                TextField("Wake Port (Auto)", text: $wakePort)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Optional WOL port. Leave empty to send to ports 9 and 7.")
+
+                TextField("Wake Timeout Seconds (Auto)", text: $wakeTimeoutSeconds)
+                    .textFieldStyle(.roundedBorder)
+                    .help("Optional wake recovery window. Leave empty for 90 seconds.")
+            } header: {
+                Text("Wake Reliability")
             }
             
             Section {
@@ -270,6 +292,9 @@ struct AutomationTab: View {
             sleepWithMac = config.sleepWithMac
             switchInputOnWake = config.switchInputOnWake
             enablePCMode = config.enablePCMode
+            wakeBroadcastAddress = config.wakeBroadcastAddress ?? ""
+            wakePort = config.wakePort.map(String.init) ?? ""
+            wakeTimeoutSeconds = config.wakeTimeoutSeconds.map { String(format: "%.0f", $0) } ?? ""
         }
     }
     
@@ -286,10 +311,35 @@ struct AutomationTab: View {
             wakeWithMac: wakeWithMac,
             sleepWithMac: sleepWithMac,
             switchInputOnWake: switchInputOnWake,
-            enablePCMode: enablePCMode
+            enablePCMode: enablePCMode,
+            wakeBroadcastAddress: optionalText(wakeBroadcastAddress),
+            wakePort: optionalPositiveInt(wakePort),
+            wakeTimeoutSeconds: optionalPositiveDouble(wakeTimeoutSeconds)
         )
         
         try? controller.saveConfiguration(updated)
+    }
+
+    private func optionalText(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func optionalPositiveInt(_ value: String) -> Int? {
+        guard let parsed = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0,
+              parsed <= Int(UInt16.max) else {
+            return nil
+        }
+        return parsed
+    }
+
+    private func optionalPositiveDouble(_ value: String) -> Double? {
+        guard let parsed = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0 else {
+            return nil
+        }
+        return parsed
     }
 }
 
