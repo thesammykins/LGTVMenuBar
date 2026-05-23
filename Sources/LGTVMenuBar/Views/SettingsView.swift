@@ -34,7 +34,7 @@ struct InlineSettingsView: View {
                 }
             #endif
         }
-        .frame(maxHeight: 500)
+        .frame(minHeight: 300)
     }
 }
 
