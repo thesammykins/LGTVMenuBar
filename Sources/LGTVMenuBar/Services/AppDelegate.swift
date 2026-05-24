@@ -65,6 +65,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         guard let controller = controller else { return }
         controller.refreshMediaKeyCapture()
+
+        if popover?.isShown == true {
+            return
+        }
+
+        guard controller.connectionState.isDisconnected || controller.connectionState.hasError else {
+            return
+        }
+
         Task {
             await controller.ensureTVAwake(reason: "appActivated")
         }

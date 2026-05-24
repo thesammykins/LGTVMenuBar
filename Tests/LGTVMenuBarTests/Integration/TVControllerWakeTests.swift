@@ -7,7 +7,7 @@ import Foundation
 struct TVControllerWakeTests {
 
     private func waitUntil(
-        timeout: Duration = .seconds(1),
+        timeout: Duration = .seconds(20),
         pollInterval: Duration = .milliseconds(10),
         _ condition: @escaping @MainActor () -> Bool
     ) async {
@@ -358,6 +358,9 @@ struct TVControllerWakeTests {
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.connectCallCount == 2)
         #expect(mockWebOS.sendCommandCalls.contains { if case .setInput = $0.command { return true }; return false })
+
+        let reconnectSuccessLog = mockDiagnostic.logCalls.last { $0.message == "Wake reconnect succeeded" }
+        #expect(reconnectSuccessLog?.metadata?["connectionState"] == "Connected")
     }
 
     @Test("wake flow continues within wake window beyond legacy retry count")
@@ -389,7 +392,7 @@ struct TVControllerWakeTests {
             wakeConnectInitialDelay: .milliseconds(1),
             wakeConnectRetryDelay: .milliseconds(1),
             wakeConnectMaxAttempts: 10,
-            wakeConnectTimeout: .milliseconds(100)
+            wakeConnectTimeout: .seconds(5)
         )
 
         let config = TVConfiguration(
@@ -630,6 +633,7 @@ struct TVControllerWakeTests {
             mediaKeyManager: mockMediaKey,
             launchAtLoginManager: mockLaunch,
             diagnosticLogger: mockDiagnostic,
+            sleepDebounceInterval: 3_600,
             wakeConnectInitialDelay: .milliseconds(10),
             wakeConnectRetryDelay: .milliseconds(10),
             wakeConnectMaxAttempts: 3

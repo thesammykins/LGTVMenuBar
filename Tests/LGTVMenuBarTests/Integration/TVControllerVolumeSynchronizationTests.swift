@@ -36,6 +36,12 @@ struct TVControllerVolumeSynchronizationTests {
             diagnosticLogger: mockDiagnostic
         )
 
+        #if LOCAL_ARYLIC_BUILD
+        controller.isArylicVolumeControlEnabled = false
+        controller.volumeControlTarget = .tv
+        controller.arylicSettings = nil
+        #endif
+
         return (controller, mockWebOS, mockDiagnostic)
     }
 

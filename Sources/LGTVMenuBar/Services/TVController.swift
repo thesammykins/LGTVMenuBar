@@ -129,8 +129,8 @@ public final class TVController: TVControllerProtocol {
     /// Timestamp of last sleep execution (for debouncing rapid sleep events)
     private var lastSleepExecution: Date = .distantPast
     
-    /// Debounce interval in seconds (matches Hammerspoon's proven value)
-    private let debounceInterval: TimeInterval = 10.0
+    /// Debounce interval in seconds for repeated sleep events.
+    private let sleepDebounceInterval: TimeInterval
 
     /// Delay before the first reconnect attempt after sending Wake-on-LAN.
     private let wakeConnectInitialDelay: Duration
@@ -162,6 +162,7 @@ public final class TVController: TVControllerProtocol {
         mediaKeyManager: MediaKeyManagerProtocol,
         launchAtLoginManager: LaunchAtLoginManagerProtocol,
         diagnosticLogger: DiagnosticLoggerProtocol,
+        sleepDebounceInterval: TimeInterval = 10.0,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
         wakeConnectMaxAttempts: Int = 45,
@@ -174,6 +175,7 @@ public final class TVController: TVControllerProtocol {
         self.mediaKeyManager = mediaKeyManager
         self.launchAtLoginManager = launchAtLoginManager
         self.diagnosticLogger = diagnosticLogger
+        self.sleepDebounceInterval = max(0, sleepDebounceInterval)
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
         self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
@@ -197,6 +199,7 @@ public final class TVController: TVControllerProtocol {
         launchAtLoginManager: LaunchAtLoginManagerProtocol,
         diagnosticLogger: DiagnosticLoggerProtocol,
         arylicClient: ArylicVolumeClientProtocol?,
+        sleepDebounceInterval: TimeInterval = 10.0,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
         wakeConnectMaxAttempts: Int = 45,
@@ -210,6 +213,7 @@ public final class TVController: TVControllerProtocol {
         self.launchAtLoginManager = launchAtLoginManager
         self.diagnosticLogger = diagnosticLogger
         self.arylicClient = arylicClient
+        self.sleepDebounceInterval = max(0, sleepDebounceInterval)
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
         self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
@@ -853,7 +857,16 @@ public final class TVController: TVControllerProtocol {
                 logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: metadata)
                 try await connect()
                 logger.info("Wake reconnect succeeded on attempt \(attempt)")
-                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: metadata)
+                let successMetadata = wakeMetadata(
+                    reason: reason,
+                    config: config,
+                    additional: [
+                        "attempt": "\(attempt)",
+                        "elapsedSeconds": elapsedSeconds,
+                        "wakeTimeoutSeconds": timeoutSeconds
+                    ]
+                )
+                logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect succeeded", metadata: successMetadata)
                 return
             } catch {
                 lastError = error
@@ -971,7 +984,7 @@ public final class TVController: TVControllerProtocol {
         // Debounce: prevent duplicate sleep attempts within 10 seconds
         let now = Date()
         let timeSinceLastSleep = now.timeIntervalSince(lastSleepExecution)
-        if timeSinceLastSleep < debounceInterval {
+        if timeSinceLastSleep < sleepDebounceInterval {
             logger.info("Skipping sleep - debounced (last execution \(String(format: "%.1f", timeSinceLastSleep))s ago)")
             logDiagnostic(level: "info", category: "TVController", message: "Sleep attempt debounced", metadata: ["timeSinceLastSleep": "\(String(format: "%.1f", timeSinceLastSleep))s"])
             return
