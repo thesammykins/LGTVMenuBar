@@ -34,7 +34,7 @@ struct InlineSettingsView: View {
                 }
             #endif
         }
-        .frame(maxHeight: 500)
+        .frame(minHeight: 300)
     }
 }
 
@@ -45,6 +45,49 @@ struct SettingsView: View {
     var body: some View {
         InlineSettingsView(controller: controller)
             .frame(width: 450, height: 350)
+    }
+}
+
+private struct SettingsLabeledField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    let helpText: String?
+
+    init(
+        _ title: String,
+        placeholder: String,
+        text: Binding<String>,
+        helpText: String? = nil
+    ) {
+        self.title = title
+        self.placeholder = placeholder
+        self._text = text
+        self.helpText = helpText
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity)
+                .optionalHelp(helpText)
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func optionalHelp(_ text: String?) -> some View {
+        if let text {
+            self.help(text)
+        } else {
+            self
+        }
     }
 }
 
@@ -63,21 +106,38 @@ struct TVConfigurationTab: View {
     var body: some View {
         Form {
             Section {
-                TextField("TV Name", text: $name)
-                    .textFieldStyle(.roundedBorder)
-                
-                TextField("IP Address", text: $ipAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .help("e.g., 192.168.1.100")
-                
-                TextField("MAC Address", text: $macAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .help("e.g., AA:BB:CC:DD:EE:FF")
-                
-                Picker("Preferred Input", selection: $preferredInput) {
-                    ForEach(TVInputType.allCases, id: \.self) { input in
-                        Text(input.displayName).tag(input)
+                SettingsLabeledField(
+                    "TV Name",
+                    placeholder: "e.g. Living Room TV",
+                    text: $name
+                )
+
+                SettingsLabeledField(
+                    "IP Address",
+                    placeholder: "e.g. 192.168.1.100",
+                    text: $ipAddress,
+                    helpText: "TV local network address"
+                )
+
+                SettingsLabeledField(
+                    "MAC Address",
+                    placeholder: "e.g. AA:BB:CC:DD:EE:FF",
+                    text: $macAddress,
+                    helpText: "Required for Wake-on-LAN"
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Preferred Input")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Preferred Input", selection: $preferredInput) {
+                        ForEach(TVInputType.allCases, id: \.self) { input in
+                            Text(input.displayName).tag(input)
+                        }
                     }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } header: {
                 Text("TV Connection")
@@ -129,7 +189,7 @@ struct TVConfigurationTab: View {
                 }
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
@@ -179,7 +239,10 @@ struct TVConfigurationTab: View {
             wakeWithMac: controller.configuration?.wakeWithMac ?? true,
             sleepWithMac: controller.configuration?.sleepWithMac ?? true,
             switchInputOnWake: controller.configuration?.switchInputOnWake ?? false,
-            enablePCMode: controller.configuration?.enablePCMode ?? false
+            enablePCMode: controller.configuration?.enablePCMode ?? false,
+            wakeBroadcastAddress: controller.configuration?.wakeBroadcastAddress,
+            wakePort: controller.configuration?.wakePort,
+            wakeTimeoutSeconds: controller.configuration?.wakeTimeoutSeconds
         )
         
         do {
@@ -215,6 +278,9 @@ struct AutomationTab: View {
     @State private var sleepWithMac: Bool = true
     @State private var switchInputOnWake: Bool = false
     @State private var enablePCMode: Bool = false
+    @State private var wakeBroadcastAddress: String = ""
+    @State private var wakePort: String = ""
+    @State private var wakeTimeoutSeconds: String = ""
     
     var body: some View {
         Form {
@@ -230,6 +296,31 @@ struct AutomationTab: View {
             } header: {
                 Text("Power Sync")
             }
+
+            Section {
+                SettingsLabeledField(
+                    "Broadcast Address (Auto)",
+                    placeholder: "e.g. 192.168.88.255",
+                    text: $wakeBroadcastAddress,
+                    helpText: "Optional subnet broadcast address, e.g. 192.168.88.255"
+                )
+
+                SettingsLabeledField(
+                    "Wake Port (Auto)",
+                    placeholder: "e.g. 9",
+                    text: $wakePort,
+                    helpText: "Optional WOL port. Leave empty to send to ports 9 and 7."
+                )
+
+                SettingsLabeledField(
+                    "Wake Timeout Seconds (Auto)",
+                    placeholder: "e.g. 90",
+                    text: $wakeTimeoutSeconds,
+                    helpText: "Optional wake recovery window. Leave empty for 90 seconds."
+                )
+            } header: {
+                Text("Wake Reliability")
+            }
             
             Section {
                 Toggle("Switch to preferred input on wake", isOn: $switchInputOnWake)
@@ -242,6 +333,8 @@ struct AutomationTab: View {
                     Text("Recommended for best display quality when using Mac")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } header: {
                 Text("Input Settings")
@@ -255,7 +348,7 @@ struct AutomationTab: View {
                 .disabled(controller.configuration == nil)
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
@@ -270,6 +363,9 @@ struct AutomationTab: View {
             sleepWithMac = config.sleepWithMac
             switchInputOnWake = config.switchInputOnWake
             enablePCMode = config.enablePCMode
+            wakeBroadcastAddress = config.wakeBroadcastAddress ?? ""
+            wakePort = config.wakePort.map(String.init) ?? ""
+            wakeTimeoutSeconds = config.wakeTimeoutSeconds.map { String(format: "%.0f", $0) } ?? ""
         }
     }
     
@@ -286,10 +382,35 @@ struct AutomationTab: View {
             wakeWithMac: wakeWithMac,
             sleepWithMac: sleepWithMac,
             switchInputOnWake: switchInputOnWake,
-            enablePCMode: enablePCMode
+            enablePCMode: enablePCMode,
+            wakeBroadcastAddress: optionalText(wakeBroadcastAddress),
+            wakePort: optionalPositiveInt(wakePort),
+            wakeTimeoutSeconds: optionalPositiveDouble(wakeTimeoutSeconds)
         )
         
         try? controller.saveConfiguration(updated)
+    }
+
+    private func optionalText(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func optionalPositiveInt(_ value: String) -> Int? {
+        guard let parsed = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0,
+              parsed <= Int(UInt16.max) else {
+            return nil
+        }
+        return parsed
+    }
+
+    private func optionalPositiveDouble(_ value: String) -> Double? {
+        guard let parsed = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0 else {
+            return nil
+        }
+        return parsed
     }
 }
 
@@ -396,7 +517,7 @@ struct GeneralTab: View {
                 Text("About")
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .task {
@@ -592,7 +713,7 @@ struct DiagnosticsTab: View {
                 Text("Privacy Notice")
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
@@ -742,23 +863,30 @@ struct ArylicTab: View {
     var body: some View {
         Form {
             Section {
-                TextField("Host/IP Address", text: $host)
-                    .textFieldStyle(.roundedBorder)
-                    .help("e.g., 192.168.1.50 or arylic.local")
-                
-                TextField("Port", text: $port)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Default: 8899")
+                SettingsLabeledField(
+                    "Host/IP Address",
+                    placeholder: "e.g. 192.168.1.50 or arylic.local",
+                    text: $host
+                )
+
+                SettingsLabeledField(
+                    "Port",
+                    placeholder: "Default: 8899",
+                    text: $port,
+                    helpText: "Valid range: 1-65535"
+                )
                 
                 if !port.isEmpty && !isPortValid {
                     Text("Port must be 1–65535")
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
-                
-                TextField("Timeout (seconds)", text: $timeout)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Default: 5.0")
+
+                SettingsLabeledField(
+                    "Timeout (seconds)",
+                    placeholder: "Default: 5.0",
+                    text: $timeout
+                )
             } header: {
                 Text("Device Connection")
             }
@@ -824,7 +952,7 @@ struct ArylicTab: View {
                 Text("Actions")
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {

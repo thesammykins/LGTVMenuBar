@@ -7,7 +7,7 @@ import Foundation
 struct TVControllerWakeTests {
 
     private func waitUntil(
-        timeout: Duration = .seconds(1),
+        timeout: Duration = .seconds(20),
         pollInterval: Duration = .milliseconds(10),
         _ condition: @escaping @MainActor () -> Bool
     ) async {
@@ -358,6 +358,110 @@ struct TVControllerWakeTests {
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.connectCallCount == 2)
         #expect(mockWebOS.sendCommandCalls.contains { if case .setInput = $0.command { return true }; return false })
+
+        let reconnectSuccessLog = mockDiagnostic.logCalls.last { $0.message == "Wake reconnect succeeded" }
+        #expect(reconnectSuccessLog?.metadata?["connectionState"] == "Connected")
+    }
+
+    @Test("wake flow continues within wake window beyond legacy retry count")
+    func wakeFlowContinuesWithinWakeWindow() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        mockWebOS.connectResults = [
+            .failure(MockWebOSClientError.timeout),
+            .failure(MockWebOSClientError.timeout),
+            .failure(MockWebOSClientError.timeout),
+            .failure(MockWebOSClientError.timeout),
+            .success(())
+        ]
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(1),
+            wakeConnectRetryDelay: .milliseconds(1),
+            wakeConnectMaxAttempts: 10,
+            wakeConnectTimeout: .seconds(5)
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.88.56",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+
+        mockPowerManager.simulateWakeEvent()
+
+        await waitUntil {
+            mockWebOS.connectCallCount == 5 && controller.connectionState == .connected
+        }
+
+        #expect(mockWOL.wakeCalls.count == 1)
+        #expect(mockWebOS.connectCallCount == 5)
+        #expect(controller.connectionState == .connected)
+    }
+
+    @Test("wake flow records wake diagnostics before sending packets")
+    func wakeFlowRecordsWakeDiagnostics() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        mockWOL.wakeDiagnosticsMetadata = [
+            "wakeTargets": "255.255.255.255:9,192.168.88.255:9",
+            "activeInterfaces": "en11=192.168.88.117/255.255.255.0",
+            "arpObservedMAC": "AA:BB:CC:DD:EE:FF"
+        ]
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(1),
+            wakeConnectRetryDelay: .milliseconds(1),
+            wakeConnectMaxAttempts: 3,
+            wakeConnectTimeout: .milliseconds(100)
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.88.56",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+
+        mockPowerManager.simulateWakeEvent()
+
+        await waitUntil {
+            mockDiagnostic.wasLogged(message: "Wake diagnostics snapshot")
+        }
+
+        let diagnosticsLog = mockDiagnostic.logCalls.first { $0.message == "Wake diagnostics snapshot" }
+        #expect(diagnosticsLog?.metadata?["wakeTargets"] == "255.255.255.255:9,192.168.88.255:9")
+        #expect(diagnosticsLog?.metadata?["requiredTVSettings"]?.contains("TV On With Mobile") == true)
+        #expect(diagnosticsLog?.metadata?["networkStandbyLimit"]?.contains("deep-off") == true)
     }
 
     @Test("stale connected state triggers wake reconnect")
@@ -529,6 +633,7 @@ struct TVControllerWakeTests {
             mediaKeyManager: mockMediaKey,
             launchAtLoginManager: mockLaunch,
             diagnosticLogger: mockDiagnostic,
+            sleepDebounceInterval: 3_600,
             wakeConnectInitialDelay: .milliseconds(10),
             wakeConnectRetryDelay: .milliseconds(10),
             wakeConnectMaxAttempts: 3

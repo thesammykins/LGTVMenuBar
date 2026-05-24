@@ -30,3 +30,9 @@ xcuserdata/
 # Agent-generated documentation (keep local only)
 docs/
 swift-testing-best-practices-2025-12.md
+
+# Agent workspace
+.opencode/
+
+# Diagnostic exports
+lgtv-diagnostics-*.json

@@ -12,6 +12,9 @@ public struct TVConfiguration: Codable, Identifiable, Sendable {
     public var sleepWithMac: Bool
     public var switchInputOnWake: Bool
     public var enablePCMode: Bool
+    public var wakeBroadcastAddress: String?
+    public var wakePort: Int?
+    public var wakeTimeoutSeconds: Double?
     
     public init(
         id: UUID = UUID(),
@@ -23,7 +26,10 @@ public struct TVConfiguration: Codable, Identifiable, Sendable {
         wakeWithMac: Bool = true,
         sleepWithMac: Bool = true,
         switchInputOnWake: Bool = false,
-        enablePCMode: Bool = false
+        enablePCMode: Bool = false,
+        wakeBroadcastAddress: String? = nil,
+        wakePort: Int? = nil,
+        wakeTimeoutSeconds: Double? = nil
     ) {
         self.id = id
         self.name = name
@@ -35,5 +41,8 @@ public struct TVConfiguration: Codable, Identifiable, Sendable {
         self.sleepWithMac = sleepWithMac
         self.switchInputOnWake = switchInputOnWake
         self.enablePCMode = enablePCMode
+        self.wakeBroadcastAddress = wakeBroadcastAddress
+        self.wakePort = wakePort
+        self.wakeTimeoutSeconds = wakeTimeoutSeconds
     }
 }

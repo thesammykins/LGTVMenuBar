@@ -13,4 +13,5 @@ import Foundation
     /// - Throws: LGTVError.wolError if the wake operation fails
     func sendWakeRequest(to configuration: TVConfiguration) async throws
     func sendWakeOnLAN(macAddress: String) async throws
+    func wakeDiagnostics(for configuration: TVConfiguration) -> [String: String]
 }
