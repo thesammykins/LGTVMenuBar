@@ -469,6 +469,22 @@ public final class TVController: TVControllerProtocol {
             return
         }
         #endif
+
+        guard soundOutput.supportsVolumeSlider else {
+            logger.info("Ignoring absolute volume set for sound output \(self.soundOutput.displayName)")
+            logDiagnostic(
+                level: "info",
+                category: "TVController",
+                message: "Ignored absolute volume set for unsupported sound output",
+                metadata: [
+                    "requestedVolume": "\(clampedLevel)",
+                    "soundOutput": soundOutput.displayName,
+                    "soundOutputRaw": soundOutput.rawValue
+                ]
+            )
+            return
+        }
+
         try await webOSClient.sendCommand(.setVolume(clampedLevel))
         self.volume = clampedLevel
     }

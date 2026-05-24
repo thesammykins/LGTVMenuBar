@@ -48,6 +48,49 @@ struct SettingsView: View {
     }
 }
 
+private struct SettingsLabeledField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    let helpText: String?
+
+    init(
+        _ title: String,
+        placeholder: String,
+        text: Binding<String>,
+        helpText: String? = nil
+    ) {
+        self.title = title
+        self.placeholder = placeholder
+        self._text = text
+        self.helpText = helpText
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: .infinity)
+                .optionalHelp(helpText)
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func optionalHelp(_ text: String?) -> some View {
+        if let text {
+            self.help(text)
+        } else {
+            self
+        }
+    }
+}
+
 // MARK: - TV Configuration Tab
 
 struct TVConfigurationTab: View {
@@ -63,21 +106,38 @@ struct TVConfigurationTab: View {
     var body: some View {
         Form {
             Section {
-                TextField("TV Name", text: $name)
-                    .textFieldStyle(.roundedBorder)
-                
-                TextField("IP Address", text: $ipAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .help("e.g., 192.168.1.100")
-                
-                TextField("MAC Address", text: $macAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .help("e.g., AA:BB:CC:DD:EE:FF")
-                
-                Picker("Preferred Input", selection: $preferredInput) {
-                    ForEach(TVInputType.allCases, id: \.self) { input in
-                        Text(input.displayName).tag(input)
+                SettingsLabeledField(
+                    "TV Name",
+                    placeholder: "e.g. Living Room TV",
+                    text: $name
+                )
+
+                SettingsLabeledField(
+                    "IP Address",
+                    placeholder: "e.g. 192.168.1.100",
+                    text: $ipAddress,
+                    helpText: "TV local network address"
+                )
+
+                SettingsLabeledField(
+                    "MAC Address",
+                    placeholder: "e.g. AA:BB:CC:DD:EE:FF",
+                    text: $macAddress,
+                    helpText: "Required for Wake-on-LAN"
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Preferred Input")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Preferred Input", selection: $preferredInput) {
+                        ForEach(TVInputType.allCases, id: \.self) { input in
+                            Text(input.displayName).tag(input)
+                        }
                     }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } header: {
                 Text("TV Connection")
@@ -129,7 +189,7 @@ struct TVConfigurationTab: View {
                 }
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
@@ -238,17 +298,26 @@ struct AutomationTab: View {
             }
 
             Section {
-                TextField("Broadcast Address (Auto)", text: $wakeBroadcastAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Optional subnet broadcast address, e.g. 192.168.88.255")
+                SettingsLabeledField(
+                    "Broadcast Address (Auto)",
+                    placeholder: "e.g. 192.168.88.255",
+                    text: $wakeBroadcastAddress,
+                    helpText: "Optional subnet broadcast address, e.g. 192.168.88.255"
+                )
 
-                TextField("Wake Port (Auto)", text: $wakePort)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Optional WOL port. Leave empty to send to ports 9 and 7.")
+                SettingsLabeledField(
+                    "Wake Port (Auto)",
+                    placeholder: "e.g. 9",
+                    text: $wakePort,
+                    helpText: "Optional WOL port. Leave empty to send to ports 9 and 7."
+                )
 
-                TextField("Wake Timeout Seconds (Auto)", text: $wakeTimeoutSeconds)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Optional wake recovery window. Leave empty for 90 seconds.")
+                SettingsLabeledField(
+                    "Wake Timeout Seconds (Auto)",
+                    placeholder: "e.g. 90",
+                    text: $wakeTimeoutSeconds,
+                    helpText: "Optional wake recovery window. Leave empty for 90 seconds."
+                )
             } header: {
                 Text("Wake Reliability")
             }
@@ -264,6 +333,8 @@ struct AutomationTab: View {
                     Text("Recommended for best display quality when using Mac")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } header: {
                 Text("Input Settings")
@@ -277,7 +348,7 @@ struct AutomationTab: View {
                 .disabled(controller.configuration == nil)
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
@@ -446,7 +517,7 @@ struct GeneralTab: View {
                 Text("About")
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .task {
@@ -642,7 +713,7 @@ struct DiagnosticsTab: View {
                 Text("Privacy Notice")
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
@@ -792,23 +863,30 @@ struct ArylicTab: View {
     var body: some View {
         Form {
             Section {
-                TextField("Host/IP Address", text: $host)
-                    .textFieldStyle(.roundedBorder)
-                    .help("e.g., 192.168.1.50 or arylic.local")
-                
-                TextField("Port", text: $port)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Default: 8899")
+                SettingsLabeledField(
+                    "Host/IP Address",
+                    placeholder: "e.g. 192.168.1.50 or arylic.local",
+                    text: $host
+                )
+
+                SettingsLabeledField(
+                    "Port",
+                    placeholder: "Default: 8899",
+                    text: $port,
+                    helpText: "Valid range: 1-65535"
+                )
                 
                 if !port.isEmpty && !isPortValid {
                     Text("Port must be 1–65535")
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
-                
-                TextField("Timeout (seconds)", text: $timeout)
-                    .textFieldStyle(.roundedBorder)
-                    .help("Default: 5.0")
+
+                SettingsLabeledField(
+                    "Timeout (seconds)",
+                    placeholder: "Default: 5.0",
+                    text: $timeout
+                )
             } header: {
                 Text("Device Connection")
             }
@@ -874,7 +952,7 @@ struct ArylicTab: View {
                 Text("Actions")
             }
         }
-        .formStyle(.columns)
+        .formStyle(.grouped)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .onAppear {
