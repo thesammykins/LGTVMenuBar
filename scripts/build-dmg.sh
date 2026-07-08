@@ -43,9 +43,15 @@ fi
 BUILD_DIR="${PROJECT_DIR}/.build"
 RELEASE_DIR="${PROJECT_DIR}/release"
 APP_BUNDLE="${RELEASE_DIR}/${APP_NAME}.app"
+APP_FRAMEWORKS_DIR="${APP_BUNDLE}/Contents/Frameworks"
 DMG_STAGING="${RELEASE_DIR}/dmg_staging"
+DMG_MOUNT="${RELEASE_DIR}/dmg_mount"
 DMG_NAME="${APP_NAME}-${VERSION}-universal.dmg"
 DMG_PATH="${RELEASE_DIR}/${DMG_NAME}"
+DMG_RW_PATH="${RELEASE_DIR}/${APP_NAME}-${VERSION}-rw.dmg"
+DMG_BACKGROUND_SOURCE="${PROJECT_DIR}/scripts/assets/dmg-background.png"
+DMG_BACKGROUND_NAME="dmg-background.png"
+SPARKLE_FRAMEWORK_SOURCE="${BUILD_DIR}/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
 # Signing defaults
 DEVELOPER_ID_IDENTITY="${DEVELOPER_ID_IDENTITY:-}"
@@ -82,8 +88,20 @@ log_step() {
 }
 
 cleanup() {
+    if hdiutil info | grep -Fq "${DMG_MOUNT}"; then
+        hdiutil detach "${DMG_MOUNT}" -quiet || true
+    fi
+
+    if [[ -d "${DMG_MOUNT}" ]]; then
+        rmdir "${DMG_MOUNT}" 2>/dev/null || true
+    fi
+
     if [[ -d "${DMG_STAGING}" ]]; then
         rm -rf "${DMG_STAGING}"
+    fi
+
+    if [[ -f "${DMG_RW_PATH}" ]]; then
+        rm -f "${DMG_RW_PATH}"
     fi
 
     if [[ -n "${TEMP_NOTARY_KEY_FILE}" && -f "${TEMP_NOTARY_KEY_FILE}" ]]; then
@@ -206,6 +224,7 @@ sign_app_ad_hoc() {
     log_step "Code Signing (Ad-hoc)"
     log_info "Signing app bundle with ad-hoc signature..."
     log_info "Note: Ad-hoc signing requires re-granting Accessibility permission after each build."
+    sign_embedded_frameworks --sign -
     codesign --force --deep --sign - "${APP_BUNDLE}"
     log_info "Verifying signature..."
     codesign --verify --deep --verbose=1 "${APP_BUNDLE}"
@@ -219,6 +238,11 @@ sign_app_release() {
     else
         log_info "Signing app bundle with Developer ID identity: ${DEVELOPER_ID_IDENTITY}"
     fi
+    sign_embedded_frameworks \
+        --sign "${DEVELOPER_ID_IDENTITY}" \
+        --options runtime \
+        --timestamp
+
     codesign \
         --force \
         --sign "${DEVELOPER_ID_IDENTITY}" \
@@ -229,6 +253,109 @@ sign_app_release() {
     log_info "Verifying app signature..."
     codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
     log_success "Developer ID code signing completed"
+}
+
+sign_embedded_frameworks() {
+    if [[ ! -d "${APP_FRAMEWORKS_DIR}" ]]; then
+        return
+    fi
+
+    local signing_args=("$@")
+    local framework
+
+    for framework in "${APP_FRAMEWORKS_DIR}"/*.framework; do
+        [[ -e "${framework}" ]] || continue
+        log_info "Signing embedded framework: $(basename "${framework}")"
+        codesign --force --deep "${signing_args[@]}" "${framework}"
+    done
+}
+
+copy_embedded_frameworks() {
+    if [[ ! -d "${SPARKLE_FRAMEWORK_SOURCE}" ]]; then
+        log_error "Sparkle.framework not found at ${SPARKLE_FRAMEWORK_SOURCE}. Run 'swift package resolve' and build again."
+        exit 1
+    fi
+
+    log_info "Embedding Sparkle.framework..."
+    mkdir -p "${APP_FRAMEWORKS_DIR}"
+    rm -rf "${APP_FRAMEWORKS_DIR}/Sparkle.framework"
+    ditto "${SPARKLE_FRAMEWORK_SOURCE}" "${APP_FRAMEWORKS_DIR}/Sparkle.framework"
+}
+
+ensure_framework_rpath() {
+    local binary_path="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+
+    if otool -l "${binary_path}" | grep -Fq "@executable_path/../Frameworks"; then
+        return
+    fi
+
+    log_info "Adding app bundle framework rpath..."
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${binary_path}"
+}
+
+disable_updater_metadata() {
+    local staged_info_plist="${APP_BUNDLE}/Contents/Info.plist"
+    local key
+
+    log_info "Removing Sparkle updater metadata from local app bundle..."
+    for key in SUFeedURL SUPublicEDKey SUEnableAutomaticChecks SUAutomaticallyUpdate; do
+        /usr/libexec/PlistBuddy -c "Delete :${key}" "${staged_info_plist}" >/dev/null 2>&1 || true
+    done
+}
+
+create_dmg_background() {
+    local output_path="$1"
+
+    if [[ ! -f "${DMG_BACKGROUND_SOURCE}" ]]; then
+        log_error "DMG background asset not found: ${DMG_BACKGROUND_SOURCE}"
+        exit 1
+    fi
+
+    cp "${DMG_BACKGROUND_SOURCE}" "${output_path}"
+}
+
+apply_dmg_finder_layout() {
+    log_info "Applying Finder window layout..."
+
+    /usr/bin/osascript <<APPLESCRIPT
+tell application "Finder"
+    set dmgFolder to POSIX file "${DMG_MOUNT}" as alias
+    set backgroundImage to file ((dmgFolder as text) & ".background:${DMG_BACKGROUND_NAME}")
+    tell folder dmgFolder
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set bounds of container window to {120, 120, 840, 600}
+
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 96
+        set background picture of viewOptions to backgroundImage
+
+        set position of item "${APP_NAME}.app" of container window to {145, 240}
+        set position of item "Applications" of container window to {570, 240}
+
+        update without registering applications
+        delay 1
+        close
+    end tell
+end tell
+APPLESCRIPT
+}
+
+detach_dmg_mount() {
+    local attempts=0
+
+    while [[ ${attempts} -lt 5 ]]; do
+        if hdiutil detach "${DMG_MOUNT}" -quiet; then
+            return
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+
+    hdiutil detach "${DMG_MOUNT}" -force -quiet
 }
 
 sign_dmg_release() {
@@ -283,6 +410,7 @@ CLEAN_BUILD=false
 RELEASE_MODE=false
 LOCAL_RELEASE_MODE=false
 SKIP_SIGNING=false
+DISABLE_UPDATER=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -302,14 +430,19 @@ while [[ $# -gt 0 ]]; do
             SKIP_SIGNING=true
             shift
             ;;
+        --disable-updater)
+            DISABLE_UPDATER=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--clean] [--release] [--local-release] [--skip-signing] [--help]"
+            echo "Usage: $0 [--clean] [--release] [--local-release] [--skip-signing] [--disable-updater] [--help]"
             echo ""
             echo "Options:"
             echo "  --clean    Clean build directory before building"
             echo "  --release  Build, Developer ID sign, notarize, and staple the DMG"
             echo "  --local-release  Build and sign with a locally available identity without notarization"
             echo "  --skip-signing  Build artifacts without signing"
+            echo "  --disable-updater  Remove Sparkle updater keys from the staged app bundle"
             echo "  --help     Show this help message"
             exit 0
             ;;
@@ -435,6 +568,10 @@ else
 EOF
 fi
 
+if [[ "${DISABLE_UPDATER}" == true ]]; then
+    disable_updater_metadata
+fi
+
 # Copy app icon
 log_info "Copying app icon..."
 if [[ -f "${PROJECT_DIR}/Sources/${APP_NAME}/Resources/AppIcon.icns" ]]; then
@@ -446,6 +583,9 @@ fi
 
 # Create PkgInfo
 echo -n "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
+
+copy_embedded_frameworks
+ensure_framework_rpath
 
 log_success "App bundle created at ${APP_BUNDLE}"
 
@@ -477,11 +617,14 @@ log_step "Creating DMG"
 
 # Clean up any existing DMG staging
 rm -rf "${DMG_STAGING}"
+rm -rf "${DMG_MOUNT}"
 rm -f "${DMG_PATH}"
+rm -f "${DMG_RW_PATH}"
 
 # Create staging directory
 log_info "Preparing DMG contents..."
 mkdir -p "${DMG_STAGING}"
+mkdir -p "${DMG_STAGING}/.background"
 
 # Copy app to staging
 cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
@@ -489,14 +632,41 @@ cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
 # Create Applications symlink
 ln -s /Applications "${DMG_STAGING}/Applications"
 
-# Create DMG
-log_info "Creating DMG image..."
+create_dmg_background "${DMG_STAGING}/.background/${DMG_BACKGROUND_NAME}"
+
+log_info "Creating read/write DMG image..."
 hdiutil create \
     -volname "${APP_NAME}" \
     -srcfolder "${DMG_STAGING}" \
     -ov \
+    -format UDRW \
+    -fs HFS+ \
+    "${DMG_RW_PATH}"
+
+mkdir -p "${DMG_MOUNT}"
+hdiutil attach "${DMG_RW_PATH}" \
+    -readwrite \
+    -noverify \
+    -noautoopen \
+    -mountpoint "${DMG_MOUNT}" \
+    -quiet
+
+apply_dmg_finder_layout
+if ! bless --folder "${DMG_MOUNT}" --openfolder "${DMG_MOUNT}" 2>/dev/null; then
+    log_info "Skipping DMG auto-open metadata; this macOS host does not support bless --openfolder."
+fi
+sync
+detach_dmg_mount
+rmdir "${DMG_MOUNT}"
+
+log_info "Converting to compressed DMG image..."
+hdiutil convert "${DMG_RW_PATH}" \
     -format UDZO \
-    "${DMG_PATH}"
+    -imagekey zlib-level=9 \
+    -o "${DMG_PATH}" \
+    -quiet
+
+rm -f "${DMG_RW_PATH}"
 
 log_success "DMG created at ${DMG_PATH}"
 

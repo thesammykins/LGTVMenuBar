@@ -191,62 +191,46 @@ final class WebOSClient: WebOSClientProtocol {
         self.configuration = configuration
         self.stateChangeCallback = stateChangeCallback
         
-        // Connection strategy: Try SSL first (required for 2022+ TVs), fallback to non-SSL
         var lastError: Error?
-        
-        // Try SSL connection (wss:// on port 3001)
-        let sslAttemptID = beginConnectionAttempt()
-        publishConnectionState(.connecting, attemptID: sslAttemptID)
-        do {
-            logger.debug("Attempting SSL connection on port 3001")
-            try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: true, attemptID: sslAttemptID)
-            self.usesSSL = true
-            logger.info("\("Successfully connected via SSL", privacy: .public) to \(configuration.name)")
-            return
-        } catch {
-            logger.debug("SSL connection failed: \(error.localizedDescription, privacy: .public), trying non-SSL")
-            lastError = error
-            // Clean up failed connection
-            webSocketTask?.cancel()
-            webSocketTask = nil
-            handshakeCompleted = false
-            failHandshake(error, attemptID: sslAttemptID)
-        }
-        
-        // Try non-SSL connection (ws:// on port 3000)
-        let nonSSLAttemptID = beginConnectionAttempt()
-        publishConnectionState(.connecting, attemptID: nonSSLAttemptID)
-        do {
-            logger.debug("Attempting non-SSL connection on port 3000")
-            try await connectWithProtocol(ipAddress: configuration.ipAddress, useSSL: false, attemptID: nonSSLAttemptID)
-            self.usesSSL = false
-            logger.info("\("Successfully connected via non-SSL", privacy: .public) to \(configuration.name)")
-            return
-        } catch {
-            logger.error("Non-SSL connection also failed: \(error.localizedDescription, privacy: .public)")
-            lastError = error
+
+        for endpoint in WebOSConnectionEndpoint.preferredOrder {
+            let attemptID = beginConnectionAttempt()
+            publishConnectionState(.connecting, attemptID: attemptID)
+
+            do {
+                logger.debug("Attempting \(endpoint.scheme, privacy: .public) connection on port \(endpoint.port)")
+                try await connectWithProtocol(ipAddress: configuration.ipAddress, endpoint: endpoint, attemptID: attemptID)
+                self.usesSSL = endpoint.usesSSL
+                logger.info("\("Successfully connected", privacy: .public) via \(endpoint.scheme, privacy: .public) to \(configuration.name)")
+                return
+            } catch {
+                logger.debug("\(endpoint.scheme, privacy: .public) connection failed: \(error.localizedDescription, privacy: .public)")
+                lastError = error
+                webSocketTask?.cancel()
+                webSocketTask = nil
+                handshakeCompleted = false
+                failHandshake(error, attemptID: attemptID)
+            }
         }
         
         // Both connection attempts failed
-        publishConnectionState(.disconnected, attemptID: nonSSLAttemptID)
+        publishConnectionState(.disconnected)
         throw LGTVError.webosError("Failed to connect to TV: \(lastError?.localizedDescription ?? "Unknown error")")
     }
     
-    /// Connect to the TV using a specific protocol (SSL or non-SSL)
+    /// Connect to the TV using a specific WebOS endpoint.
     /// - Parameters:
     ///   - ipAddress: IP address of the TV
-    ///   - useSSL: Whether to use SSL (wss://) or not (ws://)
+    ///   - endpoint: Scheme and port to try for the WebSocket connection
+    ///   - attemptID: Connection attempt identifier used to ignore stale callbacks
     /// - Throws: `LGTVError.webosError` if connection fails
-    private func connectWithProtocol(ipAddress: String, useSSL: Bool, attemptID: UInt64) async throws {
-        let port = useSSL ? 3001 : 3000
-        let scheme = useSSL ? "wss" : "ws"
-        
-        guard let wsURL = URL(string: "\(scheme)://\(ipAddress):\(port)/") else {
+    private func connectWithProtocol(ipAddress: String, endpoint: WebOSConnectionEndpoint, attemptID: UInt64) async throws {
+        guard let wsURL = endpoint.url(for: ipAddress) else {
             throw LGTVError.webosError("Invalid WebSocket URL")
         }
         
         // Create WebSocket task with appropriate session
-        let session = useSSL ? sslURLSession : urlSession
+        let session = endpoint.usesSSL ? sslURLSession : urlSession
         webSocketTask = session.webSocketTask(with: wsURL)
         webSocketTask?.resume()
         

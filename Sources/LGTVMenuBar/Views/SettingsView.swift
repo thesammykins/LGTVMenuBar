@@ -4,6 +4,7 @@ import AppKit
 /// Settings content designed for inline display in menu bar popover
 struct InlineSettingsView: View {
     @Bindable var controller: TVController
+    let softwareUpdates: SoftwareUpdateController?
     
     var body: some View {
         TabView {
@@ -17,7 +18,7 @@ struct InlineSettingsView: View {
                     Label("Automation", systemImage: "gearshape.2")
                 }
             
-            GeneralTab(controller: controller)
+            GeneralTab(controller: controller, softwareUpdates: softwareUpdates)
                 .tabItem {
                     Label("General", systemImage: "gear")
                 }
@@ -41,9 +42,18 @@ struct InlineSettingsView: View {
 /// Settings view for standalone window (kept for potential future use)
 struct SettingsView: View {
     @Bindable var controller: TVController
+    let softwareUpdates: SoftwareUpdateController?
+
+    init(
+        controller: TVController,
+        softwareUpdates: SoftwareUpdateController? = nil
+    ) {
+        self.controller = controller
+        self.softwareUpdates = softwareUpdates
+    }
     
     var body: some View {
-        InlineSettingsView(controller: controller)
+        InlineSettingsView(controller: controller, softwareUpdates: softwareUpdates)
             .frame(width: 450, height: 350)
     }
 }
@@ -101,6 +111,7 @@ struct TVConfigurationTab: View {
     @State private var macAddress: String = ""
     @State private var preferredInput: TVInputType = .hdmi1
     @State private var showingSaveConfirmation = false
+    @State private var showingClearConfirmation = false
     @State private var errorMessage: String?
     
     var body: some View {
@@ -183,7 +194,7 @@ struct TVConfigurationTab: View {
                     .disabled(name.isEmpty || ipAddress.isEmpty || macAddress.isEmpty)
                     
                     Button("Clear", role: .destructive) {
-                        clearConfiguration()
+                        showingClearConfirmation = true
                     }
                     .disabled(controller.configuration == nil)
                 }
@@ -197,6 +208,14 @@ struct TVConfigurationTab: View {
         }
         .alert("Configuration Saved", isPresented: $showingSaveConfirmation) {
             Button("OK", role: .cancel) { }
+        }
+        .confirmationDialog("Clear TV Configuration?", isPresented: $showingClearConfirmation) {
+            Button("Clear Configuration", role: .destructive) {
+                clearConfiguration()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This removes the saved TV connection details from this Mac.")
         }
     }
     
@@ -418,6 +437,7 @@ struct AutomationTab: View {
 
 struct GeneralTab: View {
     @Bindable var controller: TVController
+    let softwareUpdates: SoftwareUpdateController?
     
     @State private var launchAtLogin: Bool = false
     @State private var mediaKeysEnabled: Bool = false
@@ -504,6 +524,38 @@ struct GeneralTab: View {
             } header: {
                 Text("Volume Control")
             }
+
+            Section {
+                if let softwareUpdates, softwareUpdates.isEnabled {
+                    Toggle("Automatically check for updates", isOn: automaticUpdateChecks)
+                        .help("Check GitHub Releases for new signed builds in the background")
+
+                    Button {
+                        softwareUpdates.checkForUpdates()
+                    } label: {
+                        Label("Check for Updates...", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!softwareUpdates.canCheckForUpdates)
+                    .help("Check for the latest signed LGTV Menu Bar release")
+
+                    if let lastUpdateCheckDate = softwareUpdates.lastUpdateCheckDate {
+                        Text("Last checked \(lastUpdateCheckDate.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Label {
+                        Text("Updates are enabled in signed app builds")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } icon: {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Updates")
+            }
             
             Section {
                 VStack(alignment: .leading, spacing: 4) {
@@ -536,6 +588,13 @@ struct GeneralTab: View {
         .onDisappear {
             stopPermissionPolling()
         }
+    }
+
+    private var automaticUpdateChecks: Binding<Bool> {
+        Binding(
+            get: { softwareUpdates?.automaticallyChecksForUpdates ?? false },
+            set: { softwareUpdates?.automaticallyChecksForUpdates = $0 }
+        )
     }
     
     private func checkAccessibilityPermission() {
@@ -618,6 +677,7 @@ struct DiagnosticsTab: View {
     @State private var showingExportSuccess = false
     @State private var showingClipboardSuccess = false
     @State private var showingError = false
+    @State private var showingClearLogsConfirmation = false
     @State private var errorMessage: String = ""
     @State private var showingDeviceDetailsSuccess = false
     @State private var isCapturingDeviceDetails = false
@@ -692,8 +752,7 @@ struct DiagnosticsTab: View {
                 .disabled(entryCount == 0)
                 
                 Button("Clear Logs", role: .destructive) {
-                    controller.diagnosticLogger.clear()
-                    updateCounts()
+                    showingClearLogsConfirmation = true
                 }
                 .disabled(entryCount == 0)
             } header: {
@@ -742,6 +801,15 @@ struct DiagnosticsTab: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(errorMessage)
+        }
+        .confirmationDialog("Clear Diagnostic Logs?", isPresented: $showingClearLogsConfirmation) {
+            Button("Clear Logs", role: .destructive) {
+                controller.diagnosticLogger.clear()
+                updateCounts()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This permanently removes the diagnostic events currently stored in the app.")
         }
     }
     

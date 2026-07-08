@@ -11,7 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var settingsWindow: NSWindow?
+    private var uxTestingWindow: NSWindow?
     private var controller: TVController!
+    private let softwareUpdates = SoftwareUpdateController()
     private var eventMonitors: [Any] = []
     
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "AppDelegate")
@@ -21,12 +24,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Initialize controller
         controller = TVController()
+
+        #if UX_TESTING_APP
+        controller.applyUXTestingFixture()
+        NSApp.setActivationPolicy(.regular)
+        showUXTestingWindow()
+
+        logger.info("\("UX testing window launched successfully", privacy: .public)")
+        return
+        #else
         
         // Set activation policy to hide dock icon (menu bar only)
         NSApp.setActivationPolicy(.accessory)
         
         // Set up status bar item
         setupStatusItem()
+
+        controller.connectionStateDidChange = { [weak self] state in
+            guard let statusItem = self?.statusItem else { return }
+            StatusItemIconManager.updateStatusItem(statusItem, for: state)
+        }
         
         // Set up popover with custom behavior
         setupPopover()
@@ -50,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         logger.info("\("Application launched successfully", privacy: .public)")
+        #endif
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -63,6 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        #if UX_TESTING_APP
+        return
+        #else
         guard let controller = controller else { return }
         controller.refreshMediaKeyCapture()
 
@@ -77,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             await controller.ensureTVAwake(reason: "appActivated")
         }
+        #endif
     }
     
     // MARK: - Status Item Setup
@@ -90,7 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Set icon
-        button.image = NSImage(systemSymbolName: "tv", accessibilityDescription: "LGTV Menu Bar")
+        if let statusItem {
+            StatusItemIconManager.updateStatusItem(statusItem, for: controller.connectionState)
+        }
         
         // Set action
         button.action = #selector(togglePopover)
@@ -114,7 +138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.animates = true
         
         // Create hosting controller with MenuBarView
-        let contentView = MenuBarView(controller: controller)
+        let contentView = MenuBarView(controller: controller, softwareUpdates: softwareUpdates) { [weak self] in
+            Task { @MainActor in
+                self?.hidePopover()
+                self?.showSettingsWindow()
+            }
+        }
             .environment(\.dismissPopover, DismissPopoverAction { [weak self] in
                 Task { @MainActor in
                     self?.hidePopover()
@@ -216,6 +245,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.performClose(nil)
         logger.debug("Popover hidden")
     }
+
+    private func showSettingsWindow() {
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let settingsView = SettingsView(controller: controller, softwareUpdates: softwareUpdates)
+        let hostingController = NSHostingController(rootView: settingsView)
+
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "Settings"
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.center()
+        window.setContentSize(NSSize(width: 480, height: 440))
+        window.isReleasedWhenClosed = false
+
+        settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
     
     // MARK: - Onboarding
     
@@ -254,6 +305,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         logger.info("Onboarding window displayed")
     }
+
+    #if UX_TESTING_APP
+    private func showUXTestingWindow() {
+        let rootView = UXTestingRootView(controller: controller)
+        let hostingController = NSHostingController(rootView: rootView)
+
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "LGTV Menu Bar UX Validation"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.center()
+        window.setContentSize(NSSize(width: 980, height: 720))
+        window.minSize = NSSize(width: 820, height: 560)
+        window.isReleasedWhenClosed = false
+
+        uxTestingWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    #endif
 }
 
 // MARK: - Environment Key for Dismiss Action

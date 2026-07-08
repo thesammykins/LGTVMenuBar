@@ -68,7 +68,7 @@ struct OnboardingView: View {
             // App icon
             Image(systemName: "tv.fill")
                 .font(.system(size: 80))
-                .foregroundStyle(.blue)
+                .foregroundStyle(Color.accentColor)
             
             Text("Welcome to LGTV Menu Bar")
                 .font(.largeTitle)
@@ -92,7 +92,7 @@ struct OnboardingView: View {
         VStack(spacing: 24) {
             Image(systemName: "gearshape.fill")
                 .font(.system(size: 60))
-                .foregroundStyle(.blue)
+                .foregroundStyle(Color.accentColor)
             
             Text("Configure Your TV")
                 .font(.title)
@@ -161,7 +161,7 @@ struct OnboardingView: View {
         VStack(spacing: 24) {
             Image(systemName: "hand.tap.fill")
                 .font(.system(size: 60))
-                .foregroundStyle(.blue)
+                .foregroundStyle(Color.accentColor)
             
             Text("Accept Pairing on TV")
                 .font(.title)
@@ -279,7 +279,7 @@ struct OnboardingView: View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .frame(width: 24)
-                .foregroundStyle(.blue)
+                .foregroundStyle(Color.accentColor)
             Text(text)
             Spacer()
         }
@@ -292,7 +292,7 @@ struct OnboardingView: View {
                 .fontWeight(.bold)
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
-                .background(Circle().fill(Color.blue))
+                .background(Circle().fill(Color.accentColor))
             Text(text)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()

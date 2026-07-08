@@ -53,12 +53,7 @@ struct TVControllerWakeTests {
         try controller.saveConfiguration(config)
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWebOS.connectCallCount == 1 &&
-            mockWOL.wakeCalls.count == 1 &&
-            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.connectCallCount == 1)
@@ -102,10 +97,7 @@ struct TVControllerWakeTests {
         let connectCallCountBeforeWake = mockWebOS.connectCallCount
 
         mockPowerManager.simulateScreenWakeEvent()
-
-        await waitUntil {
-            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.isEmpty)
         #expect(mockWebOS.connectCallCount == connectCallCountBeforeWake)
@@ -149,10 +141,7 @@ struct TVControllerWakeTests {
         let connectCallCountBeforeWake = mockWebOS.connectCallCount
 
         mockPowerManager.simulateScreenUnlockEvent()
-
-        await waitUntil {
-            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.isEmpty)
         #expect(mockWebOS.connectCallCount == connectCallCountBeforeWake)
@@ -196,10 +185,7 @@ struct TVControllerWakeTests {
         mockWebOS.mockPowerStatus = TVPowerStatus(state: "Active")
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockDiagnostic.wasLogged(message: "TV already awake")
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.isEmpty)
         #expect(mockWebOS.connectCallCount == connectCallCountBeforeWake)
@@ -242,10 +228,7 @@ struct TVControllerWakeTests {
         mockWebOS.mockPowerStatus = TVPowerStatus(state: "Active Standby")
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockDiagnostic.wasLogged(message: "TV pixel refresher active - recovery skipped")
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.isEmpty)
         #expect(!mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
@@ -290,19 +273,13 @@ struct TVControllerWakeTests {
         try controller.saveConfiguration(config)
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWebOS.connectCallCount == 3
-        }
+        await controller.wakeRecoveryTask?.value
 
         let wakeCallsAfterFailure = mockWOL.wakeCalls.count
         let connectCallsAfterFailure = mockWebOS.connectCallCount
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWebOS.connectCallCount == 4
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(wakeCallsAfterFailure == 1)
         #expect(connectCallsAfterFailure == 3)
@@ -349,11 +326,7 @@ struct TVControllerWakeTests {
         try controller.saveConfiguration(config)
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWebOS.connectCallCount == 2 &&
-            mockWebOS.sendCommandCalls.contains { if case .setInput = $0.command { return true }; return false }
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.connectCallCount == 2)
@@ -404,10 +377,7 @@ struct TVControllerWakeTests {
         try controller.saveConfiguration(config)
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWebOS.connectCallCount == 5 && controller.connectionState == .connected
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.connectCallCount == 5)
@@ -453,10 +423,7 @@ struct TVControllerWakeTests {
         try controller.saveConfiguration(config)
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockDiagnostic.wasLogged(message: "Wake diagnostics snapshot")
-        }
+        await controller.wakeRecoveryTask?.value
 
         let diagnosticsLog = mockDiagnostic.logCalls.first { $0.message == "Wake diagnostics snapshot" }
         #expect(diagnosticsLog?.metadata?["wakeTargets"] == "255.255.255.255:9,192.168.88.255:9")
@@ -506,13 +473,7 @@ struct TVControllerWakeTests {
         ]
 
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWOL.wakeCalls.count == 1 &&
-            mockWebOS.connectCallCount == 2 &&
-            mockWebOS.getPowerStatusCallCount == 2 &&
-            mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false }
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.disconnectCallCount == 1)
@@ -604,11 +565,7 @@ struct TVControllerWakeTests {
 
         mockPowerManager.simulateWakeEvent()
         mockPowerManager.simulateWakeEvent()
-
-        await waitUntil {
-            mockWebOS.connectCallCount == 1 &&
-            mockDiagnostic.wasLogged(message: "Wake attempt ignored - already in progress")
-        }
+        await controller.wakeRecoveryTask?.value
 
         #expect(mockWOL.wakeCalls.count == 1)
         #expect(mockWebOS.connectCallCount == 1)

@@ -28,19 +28,19 @@ final class MockPowerManager: PowerManagerProtocol, Sendable {
     // MARK: - Callbacks
     
     /// Callback when Mac is about to sleep
-    var onSleep: (@Sendable () -> Void)?
+    var onSleep: (@MainActor @Sendable () -> Void)?
     
     /// Callback when Mac wakes from sleep
-    var onWake: (@Sendable () -> Void)?
+    var onWake: (@MainActor @Sendable () -> Void)?
     
     /// Callback when display sleeps
-    var onScreenSleep: (@Sendable () -> Void)?
+    var onScreenSleep: (@MainActor @Sendable () -> Void)?
     
     /// Callback when display wakes
-    var onScreenWake: (@Sendable () -> Void)?
+    var onScreenWake: (@MainActor @Sendable () -> Void)?
 
     /// Callback when screen unlocks
-    var onScreenUnlock: (@Sendable () -> Void)?
+    var onScreenUnlock: (@MainActor @Sendable () -> Void)?
     
     // MARK: - Call History
     

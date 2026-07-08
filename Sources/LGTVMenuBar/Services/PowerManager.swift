@@ -7,11 +7,11 @@ import AppKit
 @MainActor
 public protocol PowerManagerProtocol: Sendable {
     var isPreventingSleep: Bool { get }
-    var onSleep: (@Sendable () -> Void)? { get set }
-    var onWake: (@Sendable () -> Void)? { get set }
-    var onScreenSleep: (@Sendable () -> Void)? { get set }
-    var onScreenWake: (@Sendable () -> Void)? { get set }
-    var onScreenUnlock: (@Sendable () -> Void)? { get set }
+    var onSleep: (@MainActor @Sendable () -> Void)? { get set }
+    var onWake: (@MainActor @Sendable () -> Void)? { get set }
+    var onScreenSleep: (@MainActor @Sendable () -> Void)? { get set }
+    var onScreenWake: (@MainActor @Sendable () -> Void)? { get set }
+    var onScreenUnlock: (@MainActor @Sendable () -> Void)? { get set }
     func preventSleep() async throws
     func allowSleep() async throws
     func isSystemSleeping() async -> Bool
@@ -36,19 +36,19 @@ final class PowerManager: PowerManagerProtocol {
     }
     
     /// Callback when Mac is about to sleep
-    var onSleep: (@Sendable () -> Void)?
+    var onSleep: (@MainActor @Sendable () -> Void)?
     
     /// Callback when Mac wakes from sleep
-    var onWake: (@Sendable () -> Void)?
+    var onWake: (@MainActor @Sendable () -> Void)?
     
     /// Callback when display sleeps
-    var onScreenSleep: (@Sendable () -> Void)?
+    var onScreenSleep: (@MainActor @Sendable () -> Void)?
     
     /// Callback when display wakes
-    var onScreenWake: (@Sendable () -> Void)?
+    var onScreenWake: (@MainActor @Sendable () -> Void)?
 
     /// Callback when the locked screen is unlocked
-    var onScreenUnlock: (@Sendable () -> Void)?
+    var onScreenUnlock: (@MainActor @Sendable () -> Void)?
     
     /// Storage for workspace notification observers
     private var workspaceNotificationObservers: [NSObjectProtocol] = []

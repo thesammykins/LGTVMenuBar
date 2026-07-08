@@ -14,6 +14,14 @@
 	<string>14</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.5.0</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/thesammykins/LGTVMenuBar/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>0N8rWeZlg6AYtfM1IWcRluiO5Ks27BiEpYO6FO5FWYw=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>LSUIElement</key>
     <true/>
     <key>LSBackgroundOnly</key>

@@ -4,6 +4,8 @@ DerivedData/
 
 # Release outputs
 release/
+dist/
+screenshots/
 *.dmg
 
 # Local app bundle
@@ -26,6 +28,8 @@ xcuserdata/
 # Secrets (if any)
 *.pem
 *.p12
+*.ed25519
+sparkle-private-key*
 
 # Agent-generated documentation (keep local only)
 docs/

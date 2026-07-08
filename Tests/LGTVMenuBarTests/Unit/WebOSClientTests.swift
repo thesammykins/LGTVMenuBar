@@ -106,4 +106,86 @@ struct WebOSClientTests {
         #expect(observedStates == [.connecting])
         #expect(client.connectionState == .connecting)
     }
+
+    @Test("response payload handles nested foreground app info")
+    func responsePayloadHandlesNestedForegroundAppInfo() async {
+        let client = WebOSClient(keychainManager: MockKeychainManager())
+        let recorder = WebOSPayloadRecorder()
+        client.setInputChangeCallback { input in
+            recorder.input = input
+        }
+
+        let message = """
+        {
+          "type": "response",
+          "payload": {
+            "foregroundAppInfo": {
+              "appId": "com.webos.app.hdmi2"
+            }
+          }
+        }
+        """
+
+        await client.handleMessageForTesting(message)
+
+        #expect(recorder.input == .hdmi2)
+    }
+
+    @Test("response payload handles nested volume status")
+    func responsePayloadHandlesNestedVolumeStatus() async {
+        let client = WebOSClient(keychainManager: MockKeychainManager())
+        let recorder = WebOSPayloadRecorder()
+        client.setVolumeChangeCallback { volume, isMuted in
+            recorder.volume = volume
+            recorder.isMuted = isMuted
+        }
+
+        let message = """
+        {
+          "type": "response",
+          "payload": {
+            "volumeStatus": {
+              "volume": 42,
+              "muteStatus": true
+            }
+          }
+        }
+        """
+
+        await client.handleMessageForTesting(message)
+
+        #expect(recorder.volume == 42)
+        #expect(recorder.isMuted == true)
+    }
+
+    @Test("response payload handles nested sound output")
+    func responsePayloadHandlesNestedSoundOutput() async {
+        let client = WebOSClient(keychainManager: MockKeychainManager())
+        let recorder = WebOSPayloadRecorder()
+        client.setSoundOutputChangeCallback { output in
+            recorder.soundOutput = output
+        }
+
+        let message = """
+        {
+          "type": "response",
+          "payload": {
+            "soundOutput": {
+              "output": "external_arc"
+            }
+          }
+        }
+        """
+
+        await client.handleMessageForTesting(message)
+
+        #expect(recorder.soundOutput == .externalArc)
+    }
+}
+
+private final class WebOSPayloadRecorder: @unchecked Sendable {
+    var input: TVInputType?
+    var volume: Int?
+    var isMuted: Bool?
+    var soundOutput: TVSoundOutput?
 }

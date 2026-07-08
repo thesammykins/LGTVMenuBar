@@ -45,6 +45,7 @@ jobs:
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           umask 077
@@ -61,7 +62,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          for required_var in ASC_CERTIFICATE ASC_CERTIFICATE_PASSWORD ASC_PRIVATE_KEY ASC_KEY_ID ASC_ISSUER_ID; do
+          for required_var in ASC_CERTIFICATE ASC_CERTIFICATE_PASSWORD ASC_PRIVATE_KEY ASC_KEY_ID ASC_ISSUER_ID SPARKLE_ED_PRIVATE_KEY; do
             if [ -z "${!required_var}" ]; then
               echo "::error::Missing ${required_var} secret"
               exit 1
@@ -97,12 +98,17 @@ jobs:
 
           chmod +x ./scripts/build-dmg.sh
           ./scripts/build-dmg.sh --release
+
+          chmod +x ./scripts/generate-appcast.sh
+          ./scripts/generate-appcast.sh
       
-      - name: Upload DMG artifact
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: LGTVMenuBar-${{ steps.version.outputs.version }}
-          path: release/*.dmg
+          path: |
+            release/*.dmg
+            release/appcast.xml
           if-no-files-found: error
           retention-days: 30
       
@@ -116,6 +122,7 @@ jobs:
           generate_release_notes: true
           files: |
             release/*.dmg
+            release/appcast.xml
 
       - name: Cleanup signing materials
         if: always()

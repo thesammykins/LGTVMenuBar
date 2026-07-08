@@ -18,10 +18,14 @@ public final class TVController: TVControllerProtocol {
         didSet {
             if oldValue != connectionState {
                 logDiagnostic(level: "info", category: "TVController", message: "Connection state changed", metadata: ["oldState": "\(oldValue)", "newState": "\(connectionState)"])
+                connectionStateDidChange?(connectionState)
                 Task { await updateMediaKeyCapture() }
             }
         }
     }
+
+    @ObservationIgnored
+    var connectionStateDidChange: ((ConnectionState) -> Void)?
     
     /// TV capabilities (populated after connection)
     public private(set) var capabilities: TVCapabilities?
@@ -125,6 +129,13 @@ public final class TVController: TVControllerProtocol {
     // MARK: - Debouncing
     /// Prevent overlapping wake sequences while a previous wake is still running.
     private var isWakeInProgress = false
+
+    /// Prevent duplicate wake notifications from queueing multiple recovery tasks.
+    private var isWakeRecoveryQueued = false
+
+    /// Most recent wake-recovery task started from a power notification.
+    @ObservationIgnored
+    internal private(set) var wakeRecoveryTask: Task<Void, Never>?
     
     /// Timestamp of last sleep execution (for debouncing rapid sleep events)
     private var lastSleepExecution: Date = .distantPast
@@ -385,6 +396,27 @@ public final class TVController: TVControllerProtocol {
             logger.error("Failed to ensure TV is awake: \(error.localizedDescription)")
             logDiagnostic(level: "error", category: "TVController", message: "Failed to ensure TV is awake", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
         }
+    }
+
+    @discardableResult
+    internal func startWakeRecovery(reason: String) -> Task<Void, Never> {
+        if isWakeRecoveryQueued || isWakeInProgress {
+            if let config = configuration {
+                logDiagnostic(level: "info", category: "TVController", message: "Wake attempt ignored - already in progress", metadata: wakeMetadata(reason: reason, config: config))
+            } else {
+                logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery skipped - no configuration", metadata: ["reason": reason])
+            }
+            return wakeRecoveryTask ?? Task {}
+        }
+
+        isWakeRecoveryQueued = true
+        let task = Task(priority: .userInitiated) { @MainActor [weak self] in
+            guard let self else { return }
+            self.isWakeRecoveryQueued = false
+            await self.ensureTVAwake(reason: reason)
+        }
+        wakeRecoveryTask = task
+        return task
     }
     
     // MARK: - Power Control
@@ -664,6 +696,39 @@ public final class TVController: TVControllerProtocol {
     public func refreshMediaKeyCapture() {
         Task { await updateMediaKeyCapture() }
     }
+
+    #if UX_TESTING_APP
+    /// Seed stable UI state for the regular-window UX validation build without writing user defaults.
+    public func applyUXTestingFixture() {
+        configuration = TVConfiguration(
+            name: "LG C2",
+            ipAddress: "192.168.88.24",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            preferredInput: TVInputType.hdmi1.rawValue,
+            autoConnectOnLaunch: false,
+            wakeWithMac: true,
+            sleepWithMac: true,
+            switchInputOnWake: true,
+            enablePCMode: true,
+            wakeBroadcastAddress: "192.168.88.255",
+            wakePort: 9,
+            wakeTimeoutSeconds: 90
+        )
+        connectionState = .connected
+        capabilities = TVCapabilities(
+            modelName: "HE_DTV_W22O_AFABATAA",
+            chipType: "W22O",
+            modelYear: 2022,
+            webOSVersion: "webOS 24",
+            usesSSL: true
+        )
+        volume = 32
+        isMuted = false
+        currentInput = .hdmi1
+        soundOutput = .externalArc
+        isMediaKeyControlEnabled = false
+    }
+    #endif
     
     // MARK: - Private Methods
     
@@ -741,10 +806,7 @@ public final class TVController: TVControllerProtocol {
         // Power manager sleep/wake events
         var powerManagerMutable = powerManager
         powerManagerMutable.onWake = { [weak self] in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
-                await self?.ensureTVAwake(reason: "systemWake")
-            }
+            self?.startWakeRecovery(reason: "systemWake")
         }
         
         powerManagerMutable.onSleep = { [weak self] in
@@ -755,17 +817,11 @@ public final class TVController: TVControllerProtocol {
         }
         
         powerManagerMutable.onScreenWake = { [weak self] in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
-                await self?.ensureTVAwake(reason: "screenWake")
-            }
+            self?.startWakeRecovery(reason: "screenWake")
         }
 
         powerManagerMutable.onScreenUnlock = { [weak self] in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
-                await self?.ensureTVAwake(reason: "screenUnlock")
-            }
+            self?.startWakeRecovery(reason: "screenUnlock")
         }
         
         // Start monitoring

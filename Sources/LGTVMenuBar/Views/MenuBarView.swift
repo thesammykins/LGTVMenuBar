@@ -1,15 +1,24 @@
 import SwiftUI
 
 /// Main menu bar popover view displaying TV status and controls
-public struct MenuBarView: View {
+struct MenuBarView: View {
     @Bindable var controller: TVController
+    let softwareUpdates: SoftwareUpdateController?
+    let onOpenSettings: (() -> Void)?
     @State private var showingSettings = false
+    @State private var actionError: ActionError?
     @State private var audioOutputType: AudioOutputType = .unknown
     @State private var audioOutputName: String = ""
     @State private var audioService: AudioOutputService?
     
-    public init(controller: TVController) {
+    init(
+        controller: TVController,
+        softwareUpdates: SoftwareUpdateController? = nil,
+        onOpenSettings: (() -> Void)? = nil
+    ) {
         self.controller = controller
+        self.softwareUpdates = softwareUpdates
+        self.onOpenSettings = onOpenSettings
     }
     
     public var body: some View {
@@ -27,33 +36,40 @@ public struct MenuBarView: View {
             let arylicOnly = false
             #endif
             if controller.connectionState.isConnected {
-                QuickActionsSection(controller: controller, audioOutputType: audioOutputType)
+                QuickActionsSection(controller: controller, audioOutputType: audioOutputType, onError: reportActionError)
                 Divider()
-                VolumeSection(controller: controller)
+                VolumeSection(controller: controller, onError: reportActionError)
                 Divider()
             } else if arylicOnly {
-                VolumeSection(controller: controller)
+                VolumeSection(controller: controller, onError: reportActionError)
                 Divider()
             } else if controller.configuration != nil {
-                ConnectionSection(controller: controller)
+                ConnectionSection(controller: controller, onError: reportActionError)
                 Divider()
             }
             
             // Footer with gear toggle
-            FooterSection(showingSettings: $showingSettings)
+            FooterSection(showingSettings: $showingSettings, onOpenSettings: onOpenSettings)
             
             // Inline settings (when expanded)
-            if showingSettings {
+            if showingSettings && onOpenSettings == nil {
                 Divider()
-                InlineSettingsView(controller: controller)
+                InlineSettingsView(controller: controller, softwareUpdates: softwareUpdates)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding()
-        .frame(width: showingSettings ? 420 : 280)
-        .fixedSize(horizontal: false, vertical: showingSettings)
+        .frame(width: showingSettings && onOpenSettings == nil ? 420 : 280)
+        .fixedSize(horizontal: false, vertical: showingSettings && onOpenSettings == nil)
         .animation(.easeInOut(duration: 0.2), value: showingSettings)
         .conditionalGlassBackground()
+        .alert(item: $actionError) { actionError in
+            Alert(
+                title: Text(actionError.title),
+                message: Text(actionError.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
         .task {
             // Initialize audio service lazily
             let service = AudioOutputService()
@@ -71,6 +87,21 @@ public struct MenuBarView: View {
                 }
             }
         }
+    }
+
+    private func reportActionError(_ error: Error) {
+        actionError = ActionError(error: error)
+    }
+}
+
+private struct ActionError: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+
+    init(error: Error) {
+        self.title = "Action Failed"
+        self.message = error.localizedDescription
     }
 }
 
@@ -127,6 +158,7 @@ private struct StatusSection: View {
 
 private struct ConnectionSection: View {
     @Bindable var controller: TVController
+    let onError: (Error) -> Void
     @State private var isWaking = false
     @State private var isConnecting = false
     
@@ -147,7 +179,11 @@ private struct ConnectionSection: View {
                 Task {
                     isConnecting = true
                     defer { isConnecting = false }
-                    try? await controller.connect()
+                    do {
+                        try await controller.connect()
+                    } catch {
+                        onError(error)
+                    }
                 }
             } label: {
                 Label("Connect", systemImage: "wifi")
@@ -163,6 +199,7 @@ private struct ConnectionSection: View {
 private struct QuickActionsSection: View {
     @Bindable var controller: TVController
     let audioOutputType: AudioOutputType
+    let onError: (Error) -> Void
     
     var body: some View {
         VStack(spacing: 8) {
@@ -170,7 +207,9 @@ private struct QuickActionsSection: View {
             HStack(spacing: 12) {
                 // Power off button
                 Button {
-                    Task { try? await controller.powerOff() }
+                    performAction {
+                        try await controller.powerOff()
+                    }
                 } label: {
                     Label {
                         Text("Power Off")
@@ -186,7 +225,9 @@ private struct QuickActionsSection: View {
                 
                 // Screen off button
                 Button {
-                    Task { try? await controller.screenOff() }
+                    performAction {
+                        try await controller.screenOff()
+                    }
                 } label: {
                     Label {
                         Text("Screen Off")
@@ -207,7 +248,9 @@ private struct QuickActionsSection: View {
                 Menu {
                     ForEach(TVInputType.allCases, id: \.self) { input in
                         Button(input.displayName) {
-                            Task { try? await controller.switchInput(input) }
+                            performAction {
+                                try await controller.switchInput(input)
+                            }
                         }
                     }
                 } label: {
@@ -232,32 +275,32 @@ private struct QuickActionsSection: View {
                 if audioOutputType == .hdmi || controller.volumeControlTarget == .arylic {
                     Menu {
                         Button("TV Speaker") {
-                            Task {
-                                try? await controller.setSoundOutput(.tvSpeaker)
+                            performAction {
+                                try await controller.setSoundOutput(.tvSpeaker)
                                 #if LOCAL_ARYLIC_BUILD
                                 controller.volumeControlTarget = .tv
                                 #endif
                             }
                         }
                         Button("HDMI ARC") {
-                            Task {
-                                try? await controller.setSoundOutput(.externalArc)
+                            performAction {
+                                try await controller.setSoundOutput(.externalArc)
                                 #if LOCAL_ARYLIC_BUILD
                                 controller.volumeControlTarget = .tv
                                 #endif
                             }
                         }
                         Button("Optical") {
-                            Task {
-                                try? await controller.setSoundOutput(.externalOptical)
+                            performAction {
+                                try await controller.setSoundOutput(.externalOptical)
                                 #if LOCAL_ARYLIC_BUILD
                                 controller.volumeControlTarget = .tv
                                 #endif
                             }
                         }
                         Button("Headphone") {
-                            Task {
-                                try? await controller.setSoundOutput(.headphone)
+                            performAction {
+                                try await controller.setSoundOutput(.headphone)
                                 #if LOCAL_ARYLIC_BUILD
                                 controller.volumeControlTarget = .tv
                                 #endif
@@ -304,16 +347,24 @@ private struct QuickActionsSection: View {
                 if audioOutputType == .hdmi {
                     Menu {
                         Button("TV Speaker") {
-                            Task { try? await controller.setSoundOutput(.tvSpeaker) }
+                            performAction {
+                                try await controller.setSoundOutput(.tvSpeaker)
+                            }
                         }
                         Button("HDMI ARC") {
-                            Task { try? await controller.setSoundOutput(.externalArc) }
+                            performAction {
+                                try await controller.setSoundOutput(.externalArc)
+                            }
                         }
                         Button("Optical") {
-                            Task { try? await controller.setSoundOutput(.externalOptical) }
+                            performAction {
+                                try await controller.setSoundOutput(.externalOptical)
+                            }
                         }
                         Button("Headphone") {
-                            Task { try? await controller.setSoundOutput(.headphone) }
+                            performAction {
+                                try await controller.setSoundOutput(.headphone)
+                            }
                         }
                     } label: {
                         HStack {
@@ -336,12 +387,23 @@ private struct QuickActionsSection: View {
             }
         }
     }
+
+    private func performAction(_ action: @escaping () async throws -> Void) {
+        Task {
+            do {
+                try await action()
+            } catch {
+                onError(error)
+            }
+        }
+    }
 }
 
 // MARK: - Volume Section
 
 private struct VolumeSection: View {
     @Bindable var controller: TVController
+    let onError: (Error) -> Void
     @State private var sliderPosition: Double = 0.5  // 0-1 range, maps to volume via curve
     
     /// Convert slider position (0-1) to volume (0-100) with power curve
@@ -389,7 +451,9 @@ private struct VolumeSection: View {
                     Text("Volume")
                 } onEditingChanged: { editing in
                     if !editing {
-                        Task { try? await controller.setVolume(sliderToVolume(sliderPosition)) }
+                        performAction {
+                            try await controller.setVolume(sliderToVolume(sliderPosition))
+                        }
                     }
                 }
                 
@@ -414,7 +478,9 @@ private struct VolumeSection: View {
         HStack(spacing: 16) {
             // Volume down
             Button {
-                Task { try? await controller.volumeDown() }
+                performAction {
+                    try await controller.volumeDown()
+                }
             } label: {
                 Image(systemName: "speaker.minus.fill")
                     .imageScale(.large)
@@ -422,10 +488,14 @@ private struct VolumeSection: View {
                     .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
+            .help("Volume Down")
+            .accessibilityLabel("Volume Down")
             
             // Mute button (larger, centered)
             Button {
-                Task { try? await controller.toggleMute() }
+                performAction {
+                    try await controller.toggleMute()
+                }
             } label: {
                 Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .imageScale(.large)
@@ -434,10 +504,14 @@ private struct VolumeSection: View {
                     .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
+            .help(controller.isMuted ? "Unmute" : "Mute")
+            .accessibilityLabel(controller.isMuted ? "Unmute" : "Mute")
             
             // Volume up
             Button {
-                Task { try? await controller.volumeUp() }
+                performAction {
+                    try await controller.volumeUp()
+                }
             } label: {
                 Image(systemName: "speaker.plus.fill")
                     .imageScale(.large)
@@ -445,48 +519,76 @@ private struct VolumeSection: View {
                     .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
+            .help("Volume Up")
+            .accessibilityLabel("Volume Up")
         }
         .frame(maxWidth: .infinity)
     }
     
     private var muteButton: some View {
         Button {
-            Task { try? await controller.toggleMute() }
+            performAction {
+                try await controller.toggleMute()
+            }
         } label: {
             Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 .foregroundStyle(controller.isMuted ? .red : .primary)
         }
         .buttonStyle(.borderless)
+        .help(controller.isMuted ? "Unmute" : "Mute")
+        .accessibilityLabel(controller.isMuted ? "Unmute" : "Mute")
     }
     
     private var volumeDownButton: some View {
         Button {
             Task {
-                try? await controller.volumeDown()
-                // Update slider position based on new volume (linear 1% decrement)
-                let currentVolume = sliderToVolume(sliderPosition)
-                let newVolume = max(0, currentVolume - 1)
-                sliderPosition = volumeToSlider(newVolume)
+                do {
+                    try await controller.volumeDown()
+                    // Update slider position based on new volume (linear 1% decrement)
+                    let currentVolume = sliderToVolume(sliderPosition)
+                    let newVolume = max(0, currentVolume - 1)
+                    sliderPosition = volumeToSlider(newVolume)
+                } catch {
+                    onError(error)
+                }
             }
         } label: {
             Image(systemName: "minus")
         }
         .buttonStyle(.borderless)
+        .help("Volume Down")
+        .accessibilityLabel("Volume Down")
     }
     
     private var volumeUpButton: some View {
         Button {
             Task {
-                try? await controller.volumeUp()
-                // Update slider position based on new volume (linear 1% increment)
-                let currentVolume = sliderToVolume(sliderPosition)
-                let newVolume = min(100, currentVolume + 1)
-                sliderPosition = volumeToSlider(newVolume)
+                do {
+                    try await controller.volumeUp()
+                    // Update slider position based on new volume (linear 1% increment)
+                    let currentVolume = sliderToVolume(sliderPosition)
+                    let newVolume = min(100, currentVolume + 1)
+                    sliderPosition = volumeToSlider(newVolume)
+                } catch {
+                    onError(error)
+                }
             }
         } label: {
             Image(systemName: "plus")
         }
         .buttonStyle(.borderless)
+        .help("Volume Up")
+        .accessibilityLabel("Volume Up")
+    }
+
+    private func performAction(_ action: @escaping () async throws -> Void) {
+        Task {
+            do {
+                try await action()
+            } catch {
+                onError(error)
+            }
+        }
     }
 }
 
@@ -494,17 +596,23 @@ private struct VolumeSection: View {
 
 private struct FooterSection: View {
     @Binding var showingSettings: Bool
+    let onOpenSettings: (() -> Void)?
     
     var body: some View {
         HStack {
             Button {
-                showingSettings.toggle()
+                if let onOpenSettings {
+                    onOpenSettings()
+                } else {
+                    showingSettings.toggle()
+                }
             } label: {
-                Image(systemName: showingSettings ? "gearshape.fill" : "gearshape")
-                    .foregroundStyle(showingSettings ? .primary : .secondary)
+                Image(systemName: showingSettings && onOpenSettings == nil ? "gearshape.fill" : "gearshape")
+                    .foregroundStyle(showingSettings && onOpenSettings == nil ? .primary : .secondary)
             }
             .buttonStyle(.borderless)
-            .help(showingSettings ? "Hide Settings" : "Show Settings")
+            .help(showingSettings && onOpenSettings == nil ? "Hide Settings" : "Show Settings")
+            .accessibilityLabel(showingSettings && onOpenSettings == nil ? "Hide Settings" : "Show Settings")
             
             Spacer()
             
@@ -513,6 +621,7 @@ private struct FooterSection: View {
             }
             .buttonStyle(.borderless)
             .keyboardShortcut("q")
+            .help("Quit LGTV Menu Bar")
         }
         .font(.caption)
     }
