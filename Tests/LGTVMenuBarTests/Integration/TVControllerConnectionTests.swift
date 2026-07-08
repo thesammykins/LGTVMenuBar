@@ -40,4 +40,33 @@ struct TVControllerConnectionTests {
         #expect(controller.connectionState == .connected)
         #expect(mockDiagnostic.wasLogged(message: "Joining in-flight TV connection"))
     }
+
+    @Test("stale WebOS state callback is ignored after disconnect")
+    func staleWebOSStateCallbackIsIgnoredAfterDisconnect() async throws {
+        let mockWebOS = MockWebOSClient()
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: MockWOLService(),
+            powerManager: MockPowerManager(),
+            keychainManager: MockKeychainManager(),
+            mediaKeyManager: MockMediaKeyManager(),
+            launchAtLoginManager: MockLaunchAtLoginManager(),
+            diagnosticLogger: MockDiagnosticLogger()
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF"
+        )
+        try controller.saveConfiguration(config)
+        try await controller.connect()
+
+        controller.disconnect()
+        mockWebOS.emitStaleConnectionStateCallback(.registering)
+        await Task.yield()
+
+        #expect(controller.connectionState == .disconnected)
+    }
 }

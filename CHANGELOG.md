@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.6.2 - 2026-07-08
+
+### Fixed
+- Wake/menu reconnect no longer disconnects an active webOS registration handshake after a failed retry.
+- Stale queued WebOS connection callbacks are ignored when the client has already moved to a newer state.
+
 ## 1.6.1 - 2026-07-08
 
 ### Fixed

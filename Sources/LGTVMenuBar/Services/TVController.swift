@@ -312,8 +312,13 @@ public final class TVController: TVControllerProtocol {
         
         try await webOSClient.connect(to: config) { [weak self] state in
             Task { @MainActor in
-                self?.connectionState = state
+                self?.applyWebOSConnectionState(state)
             }
+        }
+
+        guard webOSClient.connectionState.isConnected else {
+            syncConnectionStateFromWebOSClient()
+            throw LGTVError.webosError("Connection still in progress")
         }
 
         await requestDeviceDetailsCommands()
@@ -961,7 +966,7 @@ public final class TVController: TVControllerProtocol {
                     "wakeTimeoutSeconds": timeoutSeconds,
                     "error": error.localizedDescription
                 ]))
-                disconnect()
+                resetConnectionAfterWakeFailure(reason: reason, config: config, attempt: attempt)
             }
 
             attempt += 1
@@ -1162,11 +1167,36 @@ public final class TVController: TVControllerProtocol {
         connectionState.isConnected && webOSClient.connectionState.isConnected
     }
 
+    private func applyWebOSConnectionState(_ state: ConnectionState) {
+        let clientState = webOSClient.connectionState
+        guard state == clientState else {
+            logger.debug("Ignoring stale WebOS state callback: \(state.description, privacy: .public); client is \(clientState.description, privacy: .public)")
+            return
+        }
+
+        connectionState = state
+    }
+
     private func syncConnectionStateFromWebOSClient() {
         let clientState = webOSClient.connectionState
         if connectionState != clientState {
             connectionState = clientState
         }
+    }
+
+    private func resetConnectionAfterWakeFailure(reason: String, config: TVConfiguration, attempt: Int) {
+        if webOSClient.connectionState.isTransitioning {
+            syncConnectionStateFromWebOSClient()
+            logDiagnostic(
+                level: "info",
+                category: "TVController",
+                message: "Wake reconnect preserved active registration",
+                metadata: wakeMetadata(reason: reason, config: config, additional: ["attempt": "\(attempt)"])
+            )
+            return
+        }
+
+        disconnect()
     }
 
     private func appIdentityMetadata() -> [String: String] {

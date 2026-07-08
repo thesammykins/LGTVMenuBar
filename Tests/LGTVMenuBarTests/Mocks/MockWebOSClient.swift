@@ -22,6 +22,9 @@ final class MockWebOSClient: WebOSClientProtocol {
     /// Sequence of connect results to return on successive connect attempts.
     var connectResults: [Result<Void, Error>] = []
 
+    /// Optional state to publish when a queued connect failure is emitted.
+    var connectionStateAfterConnectFailure: ConnectionState?
+
     /// Sequence of power status results to return on successive power checks.
     var powerStatusResults: [Result<TVPowerStatus, Error>] = []
 
@@ -79,8 +82,9 @@ final class MockWebOSClient: WebOSClientProtocol {
                 mockConnectionState = .connected
                 stateChangeCallback(.connected)
             case .failure(let error):
-                mockConnectionState = .error(error)
-                stateChangeCallback(.error(error))
+                let failureState = connectionStateAfterConnectFailure ?? .error(error)
+                mockConnectionState = failureState
+                stateChangeCallback(failureState)
                 throw error
             }
             return
@@ -188,6 +192,7 @@ final class MockWebOSClient: WebOSClientProtocol {
         transitionToErrorOnCommandFailure = false
         errorToThrow = MockWebOSClientError.connectionFailed("Mock error")
         connectResults.removeAll()
+        connectionStateAfterConnectFailure = nil
         powerStatusResults.removeAll()
         mockPowerStatus = TVPowerStatus(state: "Active")
         mockConnectionState = .disconnected
@@ -249,6 +254,11 @@ final class MockWebOSClient: WebOSClientProtocol {
     /// Simulate connection state change
     func simulateConnectionStateChange(to state: ConnectionState) {
         mockConnectionState = state
+        stateChangeCallback?(state)
+    }
+
+    /// Emit a callback without changing the mock's current state.
+    func emitStaleConnectionStateCallback(_ state: ConnectionState) {
         stateChangeCallback?(state)
     }
     

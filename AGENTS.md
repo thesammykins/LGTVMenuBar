@@ -94,6 +94,7 @@ Notes:
 - WebOS connection attempts should prefer secure WebSocket `wss://<host>:3001` and fall back to insecure `ws://<host>:3000`.
 - Keep endpoint ordering centralized in `WebOSConnectionEndpoint.preferredEndpoints(for:)`; tests live in `WebOSConnectionEndpointTests`.
 - Pairing registration is intentionally single-flight: duplicate `TVController.connect()` calls should join the active task, and `WebOSClient.connect(...)` must treat `.registering` as an active transition instead of resetting the socket. Coverage lives in `TVControllerConnectionTests` and `WebOSClientTests`.
+- Wake/menu reconnect retries must not call `disconnect()` while `webOSClient.connectionState.isTransitioning`; preserve active registration and let the retry window continue. Ignore stale queued WebOS state callbacks that no longer match the client state.
 - Newer webOS command payload shapes should be covered in `WebOSClientTests` before changing command serialization.
 - Wake reliability changes should keep coverage in `TVControllerWakeTests`; avoid restoring fixed retry-count behavior that exits before the wake window completes.
 

@@ -482,6 +482,53 @@ struct TVControllerWakeTests {
         #expect(mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
     }
 
+    @Test("wake reconnect preserves active registration after failed attempt")
+    func wakeReconnectPreservesActiveRegistrationAfterFailedAttempt() async throws {
+        let mockPowerManager = MockPowerManager()
+        let mockWebOS = MockWebOSClient()
+        let mockWOL = MockWOLService()
+        let mockKeychain = MockKeychainManager()
+        let mockMediaKey = MockMediaKeyManager()
+        let mockLaunch = MockLaunchAtLoginManager()
+        let mockDiagnostic = MockDiagnosticLogger()
+
+        mockWebOS.connectResults = [
+            .failure(MockWebOSClientError.timeout),
+            .success(())
+        ]
+        mockWebOS.connectionStateAfterConnectFailure = .registering
+
+        let controller = TVController(
+            webOSClient: mockWebOS,
+            wolService: mockWOL,
+            powerManager: mockPowerManager,
+            keychainManager: mockKeychain,
+            mediaKeyManager: mockMediaKey,
+            launchAtLoginManager: mockLaunch,
+            diagnosticLogger: mockDiagnostic,
+            wakeConnectInitialDelay: .milliseconds(10),
+            wakeConnectRetryDelay: .milliseconds(10),
+            wakeConnectMaxAttempts: 3
+        )
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF",
+            wakeWithMac: true
+        )
+        try controller.saveConfiguration(config)
+
+        mockPowerManager.simulateWakeEvent()
+        await controller.wakeRecoveryTask?.value
+
+        #expect(mockWOL.wakeCalls.count == 1)
+        #expect(mockWebOS.connectCallCount == 2)
+        #expect(mockWebOS.disconnectCallCount == 1)
+        #expect(controller.connectionState == .connected)
+        #expect(mockDiagnostic.wasLogged(message: "Wake reconnect preserved active registration"))
+    }
+
     @Test("device details capture stops after lost connection")
     func deviceDetailsCaptureStopsAfterLostConnection() async throws {
         let mockPowerManager = MockPowerManager()
