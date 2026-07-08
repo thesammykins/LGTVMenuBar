@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.6.0 - 2026-07-08
+
+### Added
+- Sparkle 2 updater integration with signed GitHub release appcasts.
+- Styled drag-to-Applications DMG artwork and Finder layout.
+- Non-menu bar UX validation app with scripted verify and screenshot modes.
+- Secure-first webOS connection endpoint handling for newer LG TV firmware.
+
+### Fixed
+- Settings, onboarding, menu, and confirmation flows now better match macOS HIG expectations.
+- Wake recovery no longer exits early on newer webOS connection timing.
+
+### Changed
+- Release workflow now uploads DMG and `appcast.xml` artifacts, and tag builds publish both to GitHub Releases.
+- Local Arylic builds can be packaged with updater metadata disabled.
+
 ## 1.2.0 - 2026-02-02
 
 ### Added
