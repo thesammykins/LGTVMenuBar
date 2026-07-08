@@ -40,16 +40,65 @@ Notes:
 
 # Build a signed and notarized release
 ./scripts/build-dmg.sh --release
+
+# Build a local-only app/DMG with Sparkle updater metadata removed
+./scripts/build-dmg.sh --disable-updater
 ```
 
 Operational notes:
 - The default DMG script path performs ad-hoc signing; Accessibility permission must be re-granted after each ad-hoc build.
 - `--local-release` signs with a local `Developer ID Application` certificate but does not notarize.
 - `--release` requires a local `Developer ID Application` certificate plus notary credentials via `ASC_KEY_FILE`/`ASC_KEY_ID`/`ASC_ISSUER_ID` or a configured `ASC_1PASSWORD_ITEM`.
-- GitHub Actions release validation expects `ASC_CERTIFICATE`, `ASC_CERTIFICATE_PASSWORD`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`, and `ASC_ISSUER_ID` repo secrets.
+- `--disable-updater` removes `SUFeedURL`, `SUPublicEDKey`, `SUEnableAutomaticChecks`, and `SUAutomaticallyUpdate` from the staged app bundle. Use this for local/private builds that should not self-update.
+- The DMG script embeds `Sparkle.framework`, ensures the app binary has `@executable_path/../Frameworks`, and applies the Finder drag-to-Applications layout with `scripts/assets/dmg-background.png`.
+- The DMG Finder layout intentionally places `LGTVMenuBar.app` on the left TV target and the Applications symlink on the right dashed target; preview the mounted DMG when changing `scripts/build-dmg.sh` or `scripts/assets/dmg-background.png`.
+- GitHub Actions release validation expects `ASC_CERTIFICATE`, `ASC_CERTIFICATE_PASSWORD`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `SPARKLE_ED_PRIVATE_KEY` repo secrets.
 - When duplicate `Developer ID Application` subject names exist in Keychain after certificate rotation, resolve the certificate by SHA-1 identity hash before calling `codesign`; subject-name signing becomes ambiguous.
 - `xcrun stapler validate` is the reliable local notarization check for this DMG flow; `spctl` can report `source=Insufficient Context` on a freshly stapled local DMG even when notarization succeeded.
-- Release artifacts are written to `release/`.
+- Release artifacts are written to `release/`; branch workflow runs upload `release/*.dmg` plus `release/appcast.xml`, while tag runs also publish them to GitHub Releases.
+
+## Sparkle Updates
+```bash
+# Generate or refresh appcast.xml after building the release DMG
+./scripts/generate-appcast.sh
+```
+
+Notes:
+- Sparkle 2 is integrated through SwiftPM. Keep `Package.resolved` committed so CI resolves the same Sparkle version family.
+- `Sources/LGTVMenuBar/Info.plist` contains the public Sparkle feed URL and EdDSA public key for distributable builds.
+- `SoftwareUpdateController` starts Sparkle only when both `SUFeedURL` and `SUPublicEDKey` exist in the app bundle. UX-testing and `--disable-updater` builds omit those keys, so the updater remains inactive.
+- `scripts/generate-appcast.sh` signs the appcast using `SPARKLE_ED_PRIVATE_KEY`, `SPARKLE_PRIVATE_KEY_FILE`, or the local Keychain account `com.thesammykins.lgtvmenubar`. Never print or commit the private key.
+- The appcast feed URL currently targets `https://github.com/thesammykins/LGTVMenuBar/releases/latest/download/appcast.xml`.
+- For a branch validation build, run `gh workflow run "Build and Release" --ref <branch> -f version=X.Y.Z`; this uploads build artifacts but only tag refs create a GitHub Release.
+
+## UX Testing App
+```bash
+# Build and open the non-menu bar validation app
+./script/build_and_run.sh
+
+# Build, open, verify a window appears, then exit
+./script/build_and_run.sh --verify
+
+# Build, capture a validation screenshot, then exit
+./script/build_and_run.sh --screenshot
+```
+
+Notes:
+- The UX-testing app uses `UX_TESTING_APP` and `UXTestingRootView` to show a normal macOS window instead of only the menu bar extra.
+- The runner creates `dist/UXTesting/LGTVMenuBarUXTesting.app` and writes screenshots to `screenshots/`; both paths are ignored.
+- The UX-testing bundle has a separate bundle id (`com.thesammykins.lgtvmenubar.ux-testing`) and no Sparkle feed metadata.
+- `--verify` and `--screenshot` should not leave `LGTVMenuBarUXTesting` running. If interrupted, close only that process and do not kill a user-running production app.
+
+## LG webOS Compatibility
+- WebOS connection attempts should prefer secure WebSocket `wss://<host>:3001` and fall back to insecure `ws://<host>:3000`.
+- Keep endpoint ordering centralized in `WebOSConnectionEndpoint.preferredEndpoints(for:)`; tests live in `WebOSConnectionEndpointTests`.
+- Newer webOS command payload shapes should be covered in `WebOSClientTests` before changing command serialization.
+- Wake reliability changes should keep coverage in `TVControllerWakeTests`; avoid restoring fixed retry-count behavior that exits before the wake window completes.
+
+## Local Arylic Builds
+- `Package.swift` currently defines `LOCAL_ARYLIC_BUILD` for the app and test targets.
+- Arylic-only code is guarded with `#if LOCAL_ARYLIC_BUILD`; keep tests passing with that flag enabled.
+- For Samantha's local install, build with `./scripts/build-dmg.sh --disable-updater`, then install `release/LGTVMenuBar.app` into `/Applications/LGTVMenuBar.app`. Verify updater keys are absent from `/Applications/LGTVMenuBar.app/Contents/Info.plist`.
 
 ## Versioning & Release Process
 When pushing a new build:
@@ -148,5 +197,8 @@ Documentation:
 swift build
 swift test
 swift test --filter TVConfigurationTests
-./scripts/build-dmg.sh
+./script/build_and_run.sh --verify
+./scripts/build-dmg.sh --skip-signing
+./scripts/generate-appcast.sh
+./scripts/build-dmg.sh --disable-updater
 ```
