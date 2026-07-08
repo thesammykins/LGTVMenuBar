@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.6.1 - 2026-07-08
+
+### Fixed
+- Pairing and reconnect reliability now preserves an in-flight webOS registration handshake instead of restarting the socket when duplicate connect requests arrive.
+
+### Changed
+- GitHub Releases now use the matching `CHANGELOG.md` section for release notes.
+
 ## 1.6.0 - 2026-07-08
 
 ### Added

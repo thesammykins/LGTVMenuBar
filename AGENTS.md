@@ -53,6 +53,7 @@ Operational notes:
 - The DMG script embeds `Sparkle.framework`, ensures the app binary has `@executable_path/../Frameworks`, and applies the Finder drag-to-Applications layout with `scripts/assets/dmg-background.png`.
 - The DMG Finder layout intentionally places `LGTVMenuBar.app` on the left TV target and the Applications symlink on the right dashed target; preview the mounted DMG when changing `scripts/build-dmg.sh` or `scripts/assets/dmg-background.png`.
 - GitHub Actions release validation expects `ASC_CERTIFICATE`, `ASC_CERTIFICATE_PASSWORD`, `ASC_PRIVATE_KEY`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `SPARKLE_ED_PRIVATE_KEY` repo secrets.
+- Tag releases extract their GitHub Release body from the matching `CHANGELOG.md` version section into `release/release-notes.md`; keep the changelog entry complete before tagging.
 - When duplicate `Developer ID Application` subject names exist in Keychain after certificate rotation, resolve the certificate by SHA-1 identity hash before calling `codesign`; subject-name signing becomes ambiguous.
 - `xcrun stapler validate` is the reliable local notarization check for this DMG flow; `spctl` can report `source=Insufficient Context` on a freshly stapled local DMG even when notarization succeeded.
 - Release artifacts are written to `release/`; branch workflow runs upload `release/*.dmg` plus `release/appcast.xml`, while tag runs also publish them to GitHub Releases.
@@ -92,6 +93,7 @@ Notes:
 ## LG webOS Compatibility
 - WebOS connection attempts should prefer secure WebSocket `wss://<host>:3001` and fall back to insecure `ws://<host>:3000`.
 - Keep endpoint ordering centralized in `WebOSConnectionEndpoint.preferredEndpoints(for:)`; tests live in `WebOSConnectionEndpointTests`.
+- Pairing registration is intentionally single-flight: duplicate `TVController.connect()` calls should join the active task, and `WebOSClient.connect(...)` must treat `.registering` as an active transition instead of resetting the socket. Coverage lives in `TVControllerConnectionTests` and `WebOSClientTests`.
 - Newer webOS command payload shapes should be covered in `WebOSClientTests` before changing command serialization.
 - Wake reliability changes should keep coverage in `TVControllerWakeTests`; avoid restoring fixed retry-count behavior that exits before the wake window completes.
 

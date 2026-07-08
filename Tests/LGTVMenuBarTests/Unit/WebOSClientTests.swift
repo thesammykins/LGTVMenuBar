@@ -107,6 +107,27 @@ struct WebOSClientTests {
         #expect(client.connectionState == .connecting)
     }
 
+    @Test("connect while registering does not restart pairing")
+    func connectWhileRegisteringDoesNotRestartPairing() async throws {
+        let client = WebOSClient(keychainManager: MockKeychainManager())
+        var observedStates: [ConnectionState] = []
+        client.setTestStateChangeObserver { state in
+            observedStates.append(state)
+        }
+        client.setConnectionStateForTesting(.registering, handshakeCompleted: false)
+
+        let config = TVConfiguration(
+            name: "Test TV",
+            ipAddress: "192.168.1.100",
+            macAddress: "AA:BB:CC:DD:EE:FF"
+        )
+
+        try await client.connect(to: config) { _ in }
+
+        #expect(client.connectionState == .registering)
+        #expect(observedStates.isEmpty)
+    }
+
     @Test("response payload handles nested foreground app info")
     func responsePayloadHandlesNestedForegroundAppInfo() async {
         let client = WebOSClient(keychainManager: MockKeychainManager())

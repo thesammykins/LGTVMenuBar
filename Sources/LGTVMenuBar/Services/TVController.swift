@@ -136,6 +136,10 @@ public final class TVController: TVControllerProtocol {
     /// Most recent wake-recovery task started from a power notification.
     @ObservationIgnored
     internal private(set) var wakeRecoveryTask: Task<Void, Never>?
+
+    /// Shared connection task used to avoid restarting a pairing handshake.
+    @ObservationIgnored
+    private var connectTask: Task<Void, Error>?
     
     /// Timestamp of last sleep execution (for debouncing rapid sleep events)
     private var lastSleepExecution: Date = .distantPast
@@ -277,6 +281,28 @@ public final class TVController: TVControllerProtocol {
     
     /// Connect to the configured TV
     public func connect() async throws {
+        if let connectTask {
+            logDiagnostic(
+                level: "info",
+                category: "TVController",
+                message: "Joining in-flight TV connection",
+                metadata: ["connectionState": "\(connectionState)"]
+            )
+            try await connectTask.value
+            return
+        }
+
+        let task = Task { @MainActor in
+            try await self.performConnect()
+        }
+
+        connectTask = task
+        defer { connectTask = nil }
+
+        try await task.value
+    }
+
+    private func performConnect() async throws {
         guard let config = configuration else {
             throw LGTVError.tvNotFound
         }
@@ -302,6 +328,8 @@ public final class TVController: TVControllerProtocol {
     
     /// Disconnect from the TV
     public func disconnect() {
+        connectTask?.cancel()
+        connectTask = nil
         webOSClient.disconnect()
         connectionState = .disconnected
     }

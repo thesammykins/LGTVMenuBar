@@ -101,6 +101,24 @@ jobs:
 
           chmod +x ./scripts/generate-appcast.sh
           ./scripts/generate-appcast.sh
+
+      - name: Prepare GitHub release notes
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES_PATH="release/release-notes.md"
+
+          awk -v heading="## ${VERSION} " '
+            index($0, heading) == 1 { in_section=1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md | sed '/./,$!d' > "$NOTES_PATH"
+
+          if [ ! -s "$NOTES_PATH" ]; then
+            echo "::error::No CHANGELOG.md notes found for ${VERSION}"
+            exit 1
+          fi
       
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
@@ -109,6 +127,7 @@ jobs:
           path: |
             release/*.dmg
             release/appcast.xml
+            release/release-notes.md
           if-no-files-found: error
           retention-days: 30
       
@@ -119,7 +138,7 @@ jobs:
           name: LGTVMenuBar ${{ steps.version.outputs.version }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
+          body_path: release/release-notes.md
           files: |
             release/*.dmg
             release/appcast.xml

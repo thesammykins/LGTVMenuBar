@@ -11,9 +11,9 @@
     <key>CFBundleDisplayName</key>
     <string>LGTV Menu Bar</string>
 	<key>CFBundleVersion</key>
-	<string>15</string>
+	<string>16</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.6.0</string>
+	<string>1.6.1</string>
     <key>SUFeedURL</key>
     <string>https://github.com/thesammykins/LGTVMenuBar/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>

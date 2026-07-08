@@ -165,9 +165,9 @@ final class WebOSClient: WebOSClientProtocol {
     /// - Throws: `LGTVError.webosError` if connection fails
     func connect(to configuration: TVConfiguration, stateChangeCallback: @escaping @Sendable (ConnectionState) -> Void) async throws {
         // Allow reconnection from disconnected or error states
-        // If already connected or connecting, skip
-        if _connectionState == .connected || _connectionState == .connecting {
-            logger.warning("Already connected or connecting")
+        // If a registration handshake is already active, do not reset the socket.
+        if _connectionState == .connected || _connectionState.isTransitioning {
+            logger.warning("Connection already active")
             return
         }
         
