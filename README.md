@@ -4,6 +4,10 @@
 
 A native macOS menu bar app for controlling LG webOS TVs.
 
+If my LGTV Menubar app is useful to you, you can support its development.
+
+<a href="https://ko-fi.com/sammykins/tip"><img src="https://cdn.prod.website-files.com/5c14e387dab576fe667689cf/670f5a01c01ea9191809398c_support_me_on_kofi_blue.avif" alt="Support LGTV Menubar on Ko-fi" height="32"></a>
+
 ## Screenshots
 
 | Menu bar (compact) | Menu bar (expanded) |
