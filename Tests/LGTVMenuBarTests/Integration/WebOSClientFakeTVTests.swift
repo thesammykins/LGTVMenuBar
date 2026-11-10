@@ -297,5 +297,7 @@ struct WebOSClientFakeTVTests {
         tv.setSilent("ssap://audio/getVolume")
         await waitUntil { client.connectionState.hasError }
         #expect(client.connectionState.hasError)
+        // One unanswered check is forgiven; it takes two running to drop the connection.
+        #expect(tv.requestCount(for: "ssap://audio/getVolume") >= 3)
     }
 }

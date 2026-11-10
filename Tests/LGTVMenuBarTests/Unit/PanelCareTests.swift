@@ -10,7 +10,7 @@ cond={"returnValue":true,"isCondition":true}
 """
 
 private func status(due: Bool) -> PanelCareStatus {
-    PanelCareStatus(panelHours: 100, shortRefreshLastHours: due ? 90 : 99, shortRefreshIntervalHours: 4, shortRefreshCount: 1, longRefreshLastHours: 0, longRefreshIntervalHours: 500, longRefreshCount: 0, isRefreshDue: due)
+    PanelCareStatus(panelHours: 100, refreshCount: 1, longRefreshCount: 0, isRefreshDue: due)
 }
 
 @Suite("PanelCareStatus")
@@ -18,14 +18,19 @@ struct PanelCareStatusTests {
     @Test("the TV's replies are parsed into hours and due flags")
     func parseCaptured() throws {
         let status = try #require(PanelCareStatus.parse(capturedPanelCareOutput))
-        #expect(status.panelHours == 6133)
-        #expect(status.hoursSinceShortRefresh == 114)
-        #expect(status.shortRefreshIntervalHours == 4)
-        #expect(status.shortRefreshOverdueHours == 110)
-        #expect(status.shortRefreshCount == 424)
-        #expect(status.hoursSinceLongRefresh == 541)
-        #expect(status.isLongRefreshDue)
-        #expect(status.isRefreshDue)
+        #expect(status == PanelCareStatus(panelHours: 6133, refreshCount: 424, longRefreshCount: 11, isRefreshDue: true))
+    }
+
+    @Test("after a refresh the count has gone up and nothing is due")
+    func parseAfterRefresh() throws {
+        // Captured the morning after: the last-refresh field (6037) is not on the panel-hours
+        // clock (6140), which is why no "hours since" is derived from it.
+        let output = """
+        utt={"oledPanelUTT":6140,"returnValue":true}
+        info={"returnValue":true,"jbLastTime":5592,"jbCount":11,"jbInterval":500,"pnwashKeyLock":true,"offrsInterval":4,"offrsLastTime":6037,"offrsCount":425,"subscribed":false}
+        cond={"returnValue":true,"isCondition":false}
+        """
+        #expect(PanelCareStatus.parse(output) == PanelCareStatus(panelHours: 6140, refreshCount: 425, longRefreshCount: 11, isRefreshDue: false))
     }
 
     @Test("a TV without the panel-care service reads as not available")
@@ -75,6 +80,7 @@ struct PanelCarePolicyTests {
 @MainActor
 struct TVControllerPanelCareTests {
     private final class Idle { var seconds: TimeInterval = 0 }
+    private final class LockState { var isLocked: Bool? }
 
     private struct Harness {
         let controller: TVController
@@ -83,14 +89,19 @@ struct TVControllerPanelCareTests {
         let power: MockPowerManager
         let shell: FakeRootShell
         let idle: Idle
+        let lock: LockState
+        let diagnostics: MockDiagnosticLogger
     }
 
-    private func makeHarness(refreshDue: Bool = true, rooted: Bool = true, panelCare: Bool = true) throws -> Harness {
+    private func makeHarness(refreshDue: Bool = true, rooted: Bool = true, panelCare: Bool = true, systemSaysLocked: Bool? = nil) throws -> Harness {
         let webOS = MockWebOSClient()
         let wol = MockWOLService()
         let power = MockPowerManager()
         let shell = FakeRootShell()
         let idle = Idle()
+        let lock = LockState()
+        lock.isLocked = systemSaysLocked
+        let diagnostics = MockDiagnosticLogger()
         let keychain = MockKeychainManager()
 
         shell.setHandler { command in
@@ -107,6 +118,11 @@ struct TVControllerPanelCareTests {
             return RootShellOutput(output: "uid=0\nkernel=5.4\nluna=yes", exitStatus: 0)
         }
 
+        var lockProvider: (@MainActor () -> Bool)?
+        if systemSaysLocked != nil {
+            lockProvider = { lock.isLocked ?? false }
+        }
+
         let controller = TVController(
             webOSClient: webOS,
             wolService: wol,
@@ -114,11 +130,12 @@ struct TVControllerPanelCareTests {
             keychainManager: keychain,
             mediaKeyManager: MockMediaKeyManager(),
             launchAtLoginManager: MockLaunchAtLoginManager(),
-            diagnosticLogger: MockDiagnosticLogger(),
+            diagnosticLogger: diagnostics,
             rootAccess: RootAccessService(keychain: keychain, shells: [.telnet: shell, .ssh: shell]),
             userIdleSeconds: { idle.seconds },
             panelCareGraceDelay: .milliseconds(30),
             panelCarePollInterval: .milliseconds(30),
+            isScreenLocked: lockProvider,
             sleepDebounceInterval: 0,
             wakeConnectInitialDelay: .milliseconds(5),
             wakeConnectRetryDelay: .milliseconds(5),
@@ -129,7 +146,7 @@ struct TVControllerPanelCareTests {
         config.rootAccess = RootAccessSettings(isEnabled: rooted, transport: .telnet)
         config.refreshPixelsDuringDowntime = panelCare
         try controller.saveConfiguration(config)
-        return Harness(controller: controller, webOS: webOS, wol: wol, power: power, shell: shell, idle: idle)
+        return Harness(controller: controller, webOS: webOS, wol: wol, power: power, shell: shell, idle: idle, lock: lock, diagnostics: diagnostics)
     }
 
     private func powerOffCount(_ webOS: MockWebOSClient) -> Int {
@@ -195,6 +212,68 @@ struct TVControllerPanelCareTests {
 
         #expect(powerOffCount(harness.webOS) == 0)
         #expect(harness.controller.pixelRefreshStartedAt == nil)
+    }
+
+    @Test("a display that sleeps on a locked Mac switches the TV off, with no lock notification")
+    func displaySleepOnLockedMac() async throws {
+        let harness = try makeHarness(systemSaysLocked: true)
+        try await harness.controller.connect()
+        harness.webOS.simulateInputChange(.hdmi1)
+
+        harness.power.simulateScreenSleepEvent()
+        await settle { harness.controller.pixelRefreshStartedAt != nil }
+
+        #expect(powerOffCount(harness.webOS) == 1)
+    }
+
+    @Test("the system's answer wins over a lock notification that is no longer true")
+    func systemLockStateWins() async throws {
+        let harness = try makeHarness(systemSaysLocked: false)
+        try await harness.controller.connect()
+        harness.webOS.simulateInputChange(.hdmi1)
+
+        harness.power.simulateScreenLockEvent()
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(powerOffCount(harness.webOS) == 0)
+    }
+
+    @Test("after the TV comes back, the log says whether a refresh ran")
+    func refreshOutcomeIsRecorded() async throws {
+        let harness = try makeHarness()
+        try await harness.controller.connect()
+        harness.webOS.simulateInputChange(.hdmi1)
+        await settle { harness.controller.panelCare != nil }
+        harness.power.simulateScreenLockEvent()
+        await settle { harness.controller.pixelRefreshStartedAt != nil }
+
+        harness.shell.setHandler { _ in
+            RootShellOutput(output: capturedPanelCareOutput
+                .replacingOccurrences(of: #""offrsCount":424"#, with: #""offrsCount":425"#)
+                .replacingOccurrences(of: #""isCondition":true"#, with: #""isCondition":false"#), exitStatus: 0)
+        }
+        await settle { harness.controller.pixelRefreshStartedAt == nil }
+
+        #expect(harness.diagnostics.logCalls.contains { $0.message == "Pixel refresh ran while the TV was off" })
+        #expect(harness.controller.panelCare?.refreshCount == 425)
+    }
+
+    @Test("panel care is read again when the shell was not up at connect")
+    func panelCareRetriesAfterConnect() async throws {
+        let harness = try makeHarness()
+        harness.shell.setHandler { command in
+            if command.contains("getOledPanelUTT") {
+                throw RootShellError.connectionFailed("Connection refused")
+            }
+            return RootShellOutput(output: "uid=0\nkernel=5.4\nluna=yes", exitStatus: 0)
+        }
+        try await harness.controller.connect()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(harness.controller.panelCare == nil)
+
+        harness.shell.setHandler { _ in RootShellOutput(output: capturedPanelCareOutput, exitStatus: 0) }
+        #expect(await harness.controller.refreshPanelCare())
+        #expect(harness.controller.panelCare?.refreshCount == 424)
     }
 
     @Test("a lock that ends before the grace period is over never switches the TV off")

@@ -48,7 +48,8 @@ any state -> disconnected         disconnect(), or every endpoint failed
 - Each attempt has an id. Callbacks from an older attempt are ignored.
 - Registration has two timeouts: 10 s for any answer, then 60 s once the prompt is showing.
 - Every request has a 5 s reply timeout. Only the keep-alive (a `getVolume` every 45 s) turns
-  silence into a connection failure; an ordinary request that times out just throws.
+  silence into a connection failure, and only after two unanswered in a row; an ordinary request
+  that times out just throws.
 
 ### Reconnect supervision (`TVController.ensureReconnectSupervision`)
 
@@ -96,14 +97,18 @@ so a TV that fell back to its screensaver when the Mac's display slept is still 
 
 An OLED TV refreshes its pixels after a few hours of use, but only while switched off. A TV used
 as a monitor may never be off long enough, so the refresh falls behind. With root access the app
-reads the TV's own state (`com.webos.service.oledepl`: panel hours, hours at the last refresh,
-interval, and `isPixelRefresherCondition`) into `PanelCareStatus`.
+reads the TV's own state (`com.webos.service.oledepl`: panel hours, how many refreshes have run,
+and `isPixelRefresherCondition`) into `PanelCareStatus`. Whether a refresh is due comes only from
+the TV's flag; its last-refresh figures are on a different clock from the panel hours and are not
+used. The state is read again after each connect, with retries, because the TV's shell is not up
+the moment it powers on.
 
 ```
-screen locked (option on); never while the Mac is unlocked
+screen locked, or display slept (option on); never while the Mac is unlocked
   -> grace delay (60 s; unlock or wake cancels)
   -> read panel-care state and foreground
-  -> PanelCarePolicy.powerOffDecision: still locked, due, connected, Mac's input in front?
+  -> PanelCarePolicy.powerOffDecision: locked (macOS is asked directly), due, connected,
+     Mac's input in front?
   -> governor(.powerOff) -> power off -> quiet period begins
 
 quiet period (pixelRefreshStartedAt set, at most 10 min)
@@ -115,7 +120,9 @@ quiet period (pixelRefreshStartedAt set, at most 10 min)
      system or display wake with nobody there           -> hold; wake when the period ends
 ```
 
-Mac sleep with a refresh due starts the same quiet period after the usual power-off.
+Mac sleep with a refresh due starts the same quiet period after the usual power-off. The TV's
+refresh counter is noted when a quiet period begins and compared on the next read, so the log
+says whether a refresh actually ran.
 
 ### Privileged calls (`TVPrivilegedCalls.invokePrivileged`)
 

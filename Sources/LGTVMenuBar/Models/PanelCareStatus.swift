@@ -8,47 +8,24 @@ import Foundation
 public struct PanelCareStatus: Equatable, Sendable {
     /// Total hours the panel has been lit.
     public var panelHours: Int
-    /// Panel hours when the last short refresh ran.
-    public var shortRefreshLastHours: Int
-    /// Hours of use after which a short refresh is due.
-    public var shortRefreshIntervalHours: Int
-    public var shortRefreshCount: Int
-    /// Panel hours when the last long cleaning ran.
-    public var longRefreshLastHours: Int
-    public var longRefreshIntervalHours: Int
+    /// How many short pixel refreshes the TV has run. Going up is the evidence that one ran.
+    public var refreshCount: Int
+    /// How many long pixel cleanings the TV has run.
     public var longRefreshCount: Int
     /// The TV's own verdict that a refresh should run at the next opportunity.
     public var isRefreshDue: Bool
 
-    public init(
-        panelHours: Int,
-        shortRefreshLastHours: Int,
-        shortRefreshIntervalHours: Int,
-        shortRefreshCount: Int,
-        longRefreshLastHours: Int,
-        longRefreshIntervalHours: Int,
-        longRefreshCount: Int,
-        isRefreshDue: Bool
-    ) {
+    public init(panelHours: Int, refreshCount: Int, longRefreshCount: Int, isRefreshDue: Bool) {
         self.panelHours = panelHours
-        self.shortRefreshLastHours = shortRefreshLastHours
-        self.shortRefreshIntervalHours = shortRefreshIntervalHours
-        self.shortRefreshCount = shortRefreshCount
-        self.longRefreshLastHours = longRefreshLastHours
-        self.longRefreshIntervalHours = longRefreshIntervalHours
+        self.refreshCount = refreshCount
         self.longRefreshCount = longRefreshCount
         self.isRefreshDue = isRefreshDue
     }
 
-    public var hoursSinceShortRefresh: Int { max(0, panelHours - shortRefreshLastHours) }
-    public var hoursSinceLongRefresh: Int { max(0, panelHours - longRefreshLastHours) }
-
-    /// Hours past the point where the short refresh should have run.
-    public var shortRefreshOverdueHours: Int { max(0, hoursSinceShortRefresh - shortRefreshIntervalHours) }
-
-    public var isLongRefreshDue: Bool {
-        longRefreshIntervalHours > 0 && hoursSinceLongRefresh >= longRefreshIntervalHours
-    }
+    // The TV also reports `offrsLastTime` and `jbLastTime`. They are not on the same clock as the
+    // panel hours (after a refresh at 6,136 panel hours the TV reported 6,037), so no "hours
+    // since the last refresh" is derived from them. Whether a refresh is due comes only from the
+    // TV's own flag.
 
     /// Shell command that prints the three panel-care replies as `key=json` lines.
     static let queryCommand = [
@@ -79,11 +56,7 @@ public struct PanelCareStatus: Equatable, Sendable {
 
         return PanelCareStatus(
             panelHours: panelHours,
-            shortRefreshLastHours: info["offrsLastTime"] as? Int ?? panelHours,
-            shortRefreshIntervalHours: info["offrsInterval"] as? Int ?? 0,
-            shortRefreshCount: info["offrsCount"] as? Int ?? 0,
-            longRefreshLastHours: info["jbLastTime"] as? Int ?? panelHours,
-            longRefreshIntervalHours: info["jbInterval"] as? Int ?? 0,
+            refreshCount: info["offrsCount"] as? Int ?? 0,
             longRefreshCount: info["jbCount"] as? Int ?? 0,
             isRefreshDue: isDue
         )

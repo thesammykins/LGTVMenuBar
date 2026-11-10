@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.1 - 2026-11-11
+
+### Fixed
+- Panel Care showed a made-up "hours since the last pixel refresh" and could claim a refresh was long overdue when it was not. The TV's last-refresh figure is not on the same clock as its panel hours, so the pane now shows how many refreshes have run and whether the TV says one is due.
+- Panel Care kept showing the state from before the TV was switched off, because the TV's shell is not ready the moment it powers on. The app now asks again shortly after connecting.
+- A Mac that locked because its display went to sleep was not recognised as locked, so a due pixel refresh was not given room. macOS is now asked directly whether the session is locked.
+- One unanswered keep-alive dropped and re-made the connection. It now takes two in a row.
+
+### Added
+- After the TV comes back from a pixel refresh quiet period, the diagnostic log records whether its refresh counter went up.
+
 ## 2.0.0 - 2026-11-10
 
 ### Added

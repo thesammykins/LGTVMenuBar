@@ -16,13 +16,8 @@ struct PanelCareSettingsPane: View {
         Section {
             if let status = controller.panelCare {
                 LabeledContent("Panel use", value: "\(status.panelHours.formatted()) hours")
-                LabeledContent("Since the last pixel refresh") {
-                    Text(refreshSummary(status))
-                        .foregroundStyle(status.isRefreshDue ? .primary : .secondary)
-                }
-                if status.isLongRefreshDue {
-                    InlineNotice(kind: .info, text: "The long pixel cleaning is also due (\(status.hoursSinceLongRefresh) of \(status.longRefreshIntervalHours) hours). The TV runs it by itself during a longer spell switched off, and it takes about an hour.")
-                }
+                LabeledContent("Pixel refreshes run", value: status.refreshCount.formatted())
+                LabeledContent("Next refresh", value: status.isRefreshDue ? "Due" : "Not due yet")
 
                 Toggle("Run a due pixel refresh while the Mac is locked or asleep", isOn: controller.configurationBinding(\.refreshPixelsDuringDowntime, default: false))
 
@@ -46,13 +41,5 @@ struct PanelCareSettingsPane: View {
         .task {
             await controller.refreshPanelCare()
         }
-    }
-
-    private func refreshSummary(_ status: PanelCareStatus) -> String {
-        let since = "\(status.hoursSinceShortRefresh) hours"
-        guard status.shortRefreshIntervalHours > 0 else { return since }
-        return status.isRefreshDue
-            ? "\(since) (due every \(status.shortRefreshIntervalHours))"
-            : "\(since) of \(status.shortRefreshIntervalHours)"
     }
 }

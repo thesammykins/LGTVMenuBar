@@ -97,10 +97,6 @@ struct MenuBarView: View {
 
         if controller.pixelRefreshStartedAt != nil {
             InlineNotice(kind: .info, text: "The TV is off so its pixel refresh can run. It comes back by itself when you return, or in a few minutes.")
-        } else if let panelCare = controller.panelCare, panelCare.isRefreshDue, panelCare.shortRefreshOverdueHours >= 24 {
-            InlineNotice(kind: .warning, text: "A pixel refresh is \(panelCare.shortRefreshOverdueHours) hours overdue.")
-            Button("Review in Settings…") { onOpenSettings(.panelCare) }
-                .buttonStyle(.link)
         }
 
         if !controller.suspendedAutomation.isEmpty {

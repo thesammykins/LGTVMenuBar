@@ -703,11 +703,13 @@ final class WebOSClient: WebOSClientProtocol {
 
     /// Detects a half-open socket. A WebSocket ping is avoided because not every webOS build
     /// answers pings; a cheap read every TV supports is the safer liveness probe. Only silence
-    /// counts as failure, never an error reply.
+    /// counts as failure, never an error reply, and only twice running: a busy TV occasionally
+    /// lets one request go unanswered on a connection that is otherwise fine.
     private func startKeepAlive(attemptID: UInt64?) {
         keepAliveTask?.cancel()
         let interval = timeouts.keepAliveInterval
         keepAliveTask = Task { @MainActor [weak self] in
+            var consecutiveMisses = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: interval)
                 guard !Task.isCancelled, let self,
@@ -715,11 +717,16 @@ final class WebOSClient: WebOSClientProtocol {
                       self._connectionState == .connected else { return }
                 do {
                     _ = try await self.perform(type: "request", uri: "ssap://audio/getVolume", payload: nil)
+                    consecutiveMisses = 0
                 } catch LGTVError.requestTimedOut {
                     guard self.isCurrentConnectionAttempt(attemptID), self._connectionState == .connected else { return }
+                    consecutiveMisses += 1
+                    if consecutiveMisses < 2 { continue }
                     self.handleConnectionFailure(LGTVError.connectionFailed("The TV stopped responding"), attemptID: attemptID)
                     return
                 } catch {
+                    // The TV answered, with an error: it is alive.
+                    consecutiveMisses = 0
                     continue
                 }
             }

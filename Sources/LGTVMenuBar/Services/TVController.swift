@@ -145,6 +145,9 @@ public final class TVController: TVControllerProtocol {
     private let userIdleSeconds: (@MainActor () -> TimeInterval)?
     private let panelCareGraceDelay: Duration
     private let panelCarePollInterval: Duration
+    /// Asks macOS whether the session is locked. Nil falls back to the lock notifications,
+    /// which macOS does not post when the lock comes from the display going to sleep.
+    private let isScreenLocked: (@MainActor () -> Bool)?
     /// Diagnostic logger for troubleshooting and log export
     public let diagnosticLogger: DiagnosticLoggerProtocol
 
@@ -216,6 +219,13 @@ public final class TVController: TVControllerProtocol {
     @ObservationIgnored
     private var downtimeTask: Task<Void, Never>?
 
+    @ObservationIgnored
+    private var panelCareRetryTask: Task<Void, Never>?
+
+    /// The TV's refresh counter when a quiet period began, to tell afterwards whether one ran.
+    @ObservationIgnored
+    private var refreshCountBeforeQuietPeriod: Int?
+
     /// Watches a refresh in progress and ends the quiet period when it finishes.
     @ObservationIgnored
     private var refreshMonitorTask: Task<Void, Never>?
@@ -278,6 +288,7 @@ public final class TVController: TVControllerProtocol {
         userIdleSeconds: (@MainActor () -> TimeInterval)? = nil,
         panelCareGraceDelay: Duration = .seconds(60),
         panelCarePollInterval: Duration = .seconds(30),
+        isScreenLocked: (@MainActor () -> Bool)? = nil,
         sleepDebounceInterval: TimeInterval = 10.0,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
@@ -296,6 +307,7 @@ public final class TVController: TVControllerProtocol {
         self.userIdleSeconds = userIdleSeconds
         self.panelCareGraceDelay = panelCareGraceDelay
         self.panelCarePollInterval = panelCarePollInterval
+        self.isScreenLocked = isScreenLocked
         self.sleepDebounceInterval = max(0, sleepDebounceInterval)
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
@@ -325,6 +337,7 @@ public final class TVController: TVControllerProtocol {
         userIdleSeconds: (@MainActor () -> TimeInterval)? = nil,
         panelCareGraceDelay: Duration = .seconds(60),
         panelCarePollInterval: Duration = .seconds(30),
+        isScreenLocked: (@MainActor () -> Bool)? = nil,
         sleepDebounceInterval: TimeInterval = 10.0,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
@@ -344,6 +357,7 @@ public final class TVController: TVControllerProtocol {
         self.userIdleSeconds = userIdleSeconds
         self.panelCareGraceDelay = panelCareGraceDelay
         self.panelCarePollInterval = panelCarePollInterval
+        self.isScreenLocked = isScreenLocked
         self.sleepDebounceInterval = max(0, sleepDebounceInterval)
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
@@ -370,6 +384,10 @@ public final class TVController: TVControllerProtocol {
             userIdleSeconds: {
                 // ~0 asks for any input event type.
                 CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0) ?? .null)
+            },
+            isScreenLocked: {
+                let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+                return session?["CGSSessionScreenIsLocked"] as? Bool ?? false
             }
         )
 
@@ -1034,36 +1052,66 @@ public final class TVController: TVControllerProtocol {
 
     // MARK: - Panel Care
 
-    /// Reads the panel's maintenance state through the root shell.
-    public func refreshPanelCare() async {
+    /// Reads the panel's maintenance state through the root shell. Returns false when the TV
+    /// could not be asked (its shell takes a while to come up after it powers on).
+    @discardableResult
+    public func refreshPanelCare() async -> Bool {
         #if UX_TESTING_APP
-        return
+        return true
         #else
         guard rootAccess.isUsable else {
             panelCare = nil
-            return
+            return true
         }
         do {
             let status = try await rootAccess.panelCareStatus()
+            if let before = refreshCountBeforeQuietPeriod {
+                refreshCountBeforeQuietPeriod = nil
+                let ran = status.refreshCount > before
+                logDiagnostic(level: ran ? "info" : "warning", category: "PanelCare", message: ran ? "Pixel refresh ran while the TV was off" : "The TV did not run a pixel refresh while it was off", metadata: [
+                    "refreshCountBefore": "\(before)",
+                    "refreshCountAfter": "\(status.refreshCount)",
+                    "isRefreshDue": "\(status.isRefreshDue)"
+                ])
+            }
             if status != panelCare {
                 logDiagnostic(level: "info", category: "PanelCare", message: "Panel-care state", metadata: [
                     "panelHours": "\(status.panelHours)",
-                    "hoursSinceShortRefresh": "\(status.hoursSinceShortRefresh)",
-                    "shortRefreshIntervalHours": "\(status.shortRefreshIntervalHours)",
-                    "hoursSinceLongRefresh": "\(status.hoursSinceLongRefresh)",
-                    "longRefreshIntervalHours": "\(status.longRefreshIntervalHours)",
+                    "refreshCount": "\(status.refreshCount)",
+                    "longRefreshCount": "\(status.longRefreshCount)",
                     "isRefreshDue": "\(status.isRefreshDue)"
                 ])
             }
             panelCare = status
+            return true
         } catch {
             logDiagnostic(level: "info", category: "PanelCare", message: "Panel-care state not available", metadata: ["error": error.localizedDescription])
+            return false
         }
         #endif
     }
 
-    private func handleDowntimeBegan(_ reason: String) {
-        isMacLocked = true
+    /// Reads the panel-care state after a connect, trying again if the shell is not up yet.
+    /// Without this the app keeps showing the state from before the TV was switched off.
+    private func refreshPanelCareAfterConnect() {
+        panelCareRetryTask?.cancel()
+        panelCareRetryTask = Task { @MainActor [weak self] in
+            for delay in [Duration.zero, .seconds(30), .seconds(120), .seconds(600)] {
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+                guard let self, self.connectionState.isConnected else { return }
+                if await self.refreshPanelCare() { return }
+            }
+        }
+    }
+
+    private func handleDowntimeBegan(_ reason: String, lockNotified: Bool) {
+        if lockNotified {
+            isMacLocked = true
+        }
         guard configuration?.refreshPixelsDuringDowntime == true, pixelRefreshStartedAt == nil, downtimeTask == nil else { return }
 
         logDiagnostic(level: "info", category: "PanelCare", message: "Mac downtime began", metadata: ["reason": reason])
@@ -1078,6 +1126,12 @@ public final class TVController: TVControllerProtocol {
             self.downtimeTask = nil
             await self.powerOffForPixelRefreshIfDue(reason: reason)
         }
+    }
+
+    /// macOS is asked directly where possible: it posts no lock notification when the lock comes
+    /// from the display going to sleep, which is the usual way a Mac ends up locked.
+    private var macIsLocked: Bool {
+        isScreenLocked?() ?? isMacLocked
     }
 
     private func handleDowntimeEnded(unlocked: Bool = false) {
@@ -1098,7 +1152,7 @@ public final class TVController: TVControllerProtocol {
 
         let decision = PanelCarePolicy.powerOffDecision(
             isEnabled: config.refreshPixelsDuringDowntime,
-            isMacLocked: isMacLocked,
+            isMacLocked: macIsLocked,
             status: panelCare,
             isConnected: connectionState.isConnected,
             foreground: foreground,
@@ -1107,7 +1161,7 @@ public final class TVController: TVControllerProtocol {
         logDiagnostic(level: "info", category: "PanelCare", message: "Downtime decision", metadata: [
             "reason": reason,
             "decision": "\(decision)",
-            "isMacLocked": "\(isMacLocked)",
+            "isMacLocked": "\(macIsLocked)",
             "foreground": foreground.diagnosticDescription,
             "isRefreshDue": panelCare.map { "\($0.isRefreshDue)" } ?? "unknown",
             "connectionState": "\(connectionState)"
@@ -1129,6 +1183,7 @@ public final class TVController: TVControllerProtocol {
     /// refresh done, stops answering, or the window runs out.
     private func beginPixelRefreshWindow(reason: String) {
         pixelRefreshStartedAt = Date()
+        refreshCountBeforeQuietPeriod = panelCare?.refreshCount
         reconnectTask?.cancel()
         reconnectTask = nil
         logDiagnostic(level: "info", category: "PanelCare", message: "TV switched off for a pixel refresh", metadata: ["reason": reason])
@@ -1151,15 +1206,13 @@ public final class TVController: TVControllerProtocol {
                 }
                 if self.isMacAsleep { continue }
 
-                do {
-                    let status = try await self.rootAccess.panelCareStatus()
-                    self.panelCare = status
+                if await self.refreshPanelCare() {
                     unanswered = 0
-                    if !status.isRefreshDue {
+                    if self.panelCare?.isRefreshDue == false {
                         self.endPixelRefreshWindow(outcome: "refresh completed")
                         return
                     }
-                } catch {
+                } else {
                     // The TV goes fully to sleep when it has finished.
                     unanswered += 1
                     if unanswered >= 3 {
@@ -1295,7 +1348,7 @@ public final class TVController: TVControllerProtocol {
         foreground = scenario == .appInFront ? .app("netflix") : .input(.hdmi1)
         currentInput = foreground.input
         panelCare = scenario == .rooted || scenario == .pixelRefresh
-            ? PanelCareStatus(panelHours: 6133, shortRefreshLastHours: 6019, shortRefreshIntervalHours: 4, shortRefreshCount: 424, longRefreshLastHours: 5592, longRefreshIntervalHours: 500, longRefreshCount: 11, isRefreshDue: true)
+            ? PanelCareStatus(panelHours: 6133, refreshCount: 424, longRefreshCount: 11, isRefreshDue: true)
             : nil
         pixelRefreshStartedAt = scenario == .pixelRefresh ? Date().addingTimeInterval(-180) : nil
         soundOutput = .tvSpeaker
@@ -1413,7 +1466,11 @@ public final class TVController: TVControllerProtocol {
         }
 
         powerManagerMutable.onScreenLock = { [weak self] in
-            self?.handleDowntimeBegan("screenLocked")
+            self?.handleDowntimeBegan("screenLocked", lockNotified: true)
+        }
+
+        powerManagerMutable.onScreenSleep = { [weak self] in
+            self?.handleDowntimeBegan("displaySlept", lockNotified: false)
         }
 
         
@@ -1771,7 +1828,7 @@ public final class TVController: TVControllerProtocol {
         if let firmwareVersion = root.firmwareVersion {
             capabilities?.firmwareVersion = firmwareVersion
         }
-        await refreshPanelCare()
+        refreshPanelCareAfterConnect()
         #endif
     }
 
