@@ -17,7 +17,9 @@ permissions:
 jobs:
   build:
     name: Build macOS App
-    runs-on: macos-15
+    # Swift 6.4 or later is needed: Package.resolved pins dependencies whose manifests require
+    # it. Move to the macOS runner that ships Xcode 27 once it leaves preview.
+    runs-on: xcode-27
     
     steps:
       - name: Checkout repository

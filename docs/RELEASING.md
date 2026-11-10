@@ -52,6 +52,9 @@
    ```
    The tag run builds, notarizes and publishes the GitHub Release.
 
+CI runs on the `xcode-27` runner image because the pinned dependencies need Swift 6.4 or
+later; an older runner fails at package resolution.
+
 CI needs these repository secrets: `ASC_CERTIFICATE`, `ASC_CERTIFICATE_PASSWORD`,
 `ASC_PRIVATE_KEY`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, `SPARKLE_ED_PRIVATE_KEY`.
 
