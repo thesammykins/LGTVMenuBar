@@ -71,6 +71,59 @@ public final class KeychainManager: KeychainManagerProtocol, Sendable {
         }
     }
     
+    // MARK: - Generic Secrets
+
+    /// Keychain service identifier for root shell credentials
+    private static let secretService = "com.lgtvmenubar.rootaccess"
+
+    public func saveSecret(_ secret: Data, account: String) throws {
+        do {
+            try delete(service: Self.secretService, forKey: account)
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: Self.secretService,
+                kSecAttrAccount as String: account,
+                kSecValueData as String: secret,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
+            ]
+            let status = SecItemAdd(query as CFDictionary, nil)
+            guard status == errSecSuccess else {
+                throw KeychainError.saveFailed(status)
+            }
+        } catch {
+            throw LGTVError.keychainError(error)
+        }
+    }
+
+    public func loadSecret(account: String) throws -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.secretService,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            return result as? Data
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw LGTVError.keychainError(KeychainError.retrieveFailed(status))
+        }
+    }
+
+    public func deleteSecret(account: String) throws {
+        do {
+            try delete(service: Self.secretService, forKey: account)
+        } catch {
+            throw LGTVError.keychainError(error)
+        }
+    }
+
     // MARK: - Private Keychain Operations
     
     /// Save a string value to the keychain

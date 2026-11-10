@@ -650,6 +650,7 @@ struct TVControllerWakeTests {
             sleepWithMac: true
         )
         try controller.saveConfiguration(config)
+        try await controller.connect()
 
         mockPowerManager.simulateSleepEvent()
         try await Task.sleep(for: .milliseconds(50))

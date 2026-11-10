@@ -12,6 +12,15 @@ public final class TVCapabilities {
     
     /// Maps input IDs to their current icon (e.g., "HDMI_1": "pc.png")
     public var inputIcons: [String: String] = [:]
+
+    /// Retail model reported by the TV (e.g. "OLED42C24LA").
+    public var displayModel: String = ""
+
+    /// Firmware version (e.g. "03.33.85").
+    public var firmwareVersion: String = ""
+
+    /// External inputs as reported by the TV, in the TV's order.
+    public var inputs: [TVInputInfo] = []
     
     public init() {}
     

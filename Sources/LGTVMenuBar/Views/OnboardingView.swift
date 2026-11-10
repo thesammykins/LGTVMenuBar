@@ -13,7 +13,7 @@ struct OnboardingView: View {
     @State private var preferredInput: TVInputType = .hdmi1
     @State private var isConnecting: Bool = false
     @State private var errorMessage: String?
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     
     var body: some View {
         VStack(spacing: 0) {
@@ -58,6 +58,8 @@ struct OnboardingView: View {
                     .frame(width: 10, height: 10)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Step \(currentStep.rawValue + 1) of \(OnboardingStep.allCases.count)")
         .padding(.vertical, 16)
     }
     
@@ -77,12 +79,12 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 12) {
                 featureRow(icon: "power", text: "Control your LG TV from the menu bar")
                 featureRow(icon: "speaker.wave.2", text: "Adjust volume and switch inputs")
-                featureRow(icon: "moon.stars", text: "Auto wake/sleep with your Mac")
+                featureRow(icon: "moon.stars", text: "Turn the TV on and off with your Mac")
                 featureRow(icon: "keyboard", text: "Use keyboard volume keys for TV")
             }
             .padding(.horizontal, 32)
             
-            Text("Let's set up your TV in a few simple steps")
+            Text("Setting up takes about a minute.")
                 .foregroundStyle(.secondary)
                 .padding(.top, 8)
         }
@@ -104,7 +106,7 @@ struct OnboardingView: View {
                     Text("TV Name")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField("e.g., Living Room TV", text: $tvName)
+                    TextField("TV Name", text: $tvName, prompt: Text("Living Room TV"))
                         .textFieldStyle(.roundedBorder)
                 }
                 
@@ -113,9 +115,9 @@ struct OnboardingView: View {
                     Text("IP Address")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField("e.g., 192.168.1.100", text: $ipAddress)
+                    TextField("IP Address", text: $ipAddress, prompt: Text("192.168.1.20"))
                         .textFieldStyle(.roundedBorder)
-                    Text("Find this in your TV's Network Settings")
+                    Text("Under Network in the TV's settings.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -125,20 +127,20 @@ struct OnboardingView: View {
                     Text("MAC Address")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField("e.g., AA:BB:CC:DD:EE:FF", text: $macAddress)
+                    TextField("MAC Address", text: $macAddress, prompt: Text("AA:BB:CC:DD:EE:FF"))
                         .textFieldStyle(.roundedBorder)
-                    Text("Find this in your TV's Network Settings (needed for Wake-on-LAN)")
+                    Text("Also under Network in the TV's settings. It is used to turn the TV on.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
                 
                 // Preferred Input
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Preferred HDMI Input")
+                    Text("Mac Is Connected To")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Picker("", selection: $preferredInput) {
-                        ForEach(TVInputType.allCases, id: \.self) { input in
+                    Picker("Mac is connected to", selection: $preferredInput) {
+                        ForEach([TVInputType.hdmi1, .hdmi2, .hdmi3, .hdmi4], id: \.self) { input in
                             Text(input.displayName).tag(input)
                         }
                     }
@@ -163,14 +165,14 @@ struct OnboardingView: View {
                 .font(.system(size: 60))
                 .foregroundStyle(Color.accentColor)
             
-            Text("Accept Pairing on TV")
+            Text("Accept the Prompt on Your TV")
                 .font(.title)
                 .fontWeight(.bold)
             
             VStack(alignment: .leading, spacing: 16) {
-                instructionRow(number: 1, text: "A pairing prompt will appear on your TV screen")
-                instructionRow(number: 2, text: "Use your TV remote to select \"Accept\" or \"Allow\"")
-                instructionRow(number: 3, text: "The app will connect once you accept the pairing")
+                instructionRow(number: 1, text: "The TV shows a prompt asking whether to allow this Mac.")
+                instructionRow(number: 2, text: "Choose Accept with the TV remote. You have about a minute.")
+                instructionRow(number: 3, text: "Setup continues by itself once the TV accepts.")
             }
             .padding(.horizontal, 32)
             
@@ -178,7 +180,7 @@ struct OnboardingView: View {
                 VStack(spacing: 12) {
                     ProgressView()
                         .controlSize(.large)
-                    Text("Waiting for TV pairing...")
+                    Text(controller.connectionState == .awaitingPairing ? "Waiting for you to accept on the TV…" : "Contacting the TV…")
                         .foregroundStyle(.secondary)
                 }
                 .padding(.top, 16)
@@ -202,28 +204,20 @@ struct OnboardingView: View {
                 .font(.system(size: 80))
                 .foregroundStyle(.green)
             
-            Text("You're All Set!")
+            Text("Your TV Is Ready")
                 .font(.largeTitle)
                 .fontWeight(.bold)
             
             VStack(alignment: .leading, spacing: 12) {
-                Text("Your TV is now configured and ready to use.")
-                    .foregroundStyle(.secondary)
-                
-                Text("You can:")
-                    .fontWeight(.semibold)
-                    .padding(.top, 8)
-                
-                featureRow(icon: "menubar.rectangle", text: "Click the TV icon in your menu bar")
-                featureRow(icon: "gearshape", text: "Access settings to customize automation")
-                featureRow(icon: "power", text: "Control your TV from anywhere on your Mac")
+                featureRow(icon: "menubar.rectangle", text: "Click the TV icon in the menu bar for power, input and volume.")
+                featureRow(icon: "gearshape", text: "Open Settings from there to choose what happens when your Mac sleeps and wakes.")
             }
             .padding(.horizontal, 32)
             
             Button {
                 completeOnboarding()
             } label: {
-                Text("Get Started")
+                Text("Done")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -263,10 +257,10 @@ struct OnboardingView: View {
                 Button {
                     goNext()
                 } label: {
-                    Label(nextButtonTitle, systemImage: "chevron.right")
-                        .labelStyle(.titleAndIcon)
+                    Text(nextButtonTitle)
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(!canProceed)
             }
         }
@@ -290,9 +284,10 @@ struct OnboardingView: View {
             Text("\(number)")
                 .font(.title3)
                 .fontWeight(.bold)
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.accentColor)
                 .frame(width: 32, height: 32)
-                .background(Circle().fill(Color.accentColor))
+                .background(Circle().fill(Color.accentColor.opacity(0.15)))
+                .accessibilityHidden(true)
             Text(text)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
@@ -303,8 +298,8 @@ struct OnboardingView: View {
     
     private var nextButtonTitle: String {
         switch currentStep {
-        case .welcome: return "Get Started"
-        case .configuration: return "Connect to TV"
+        case .welcome: return "Continue"
+        case .configuration: return "Connect"
         case .instructions: return "Continue"
         case .success: return ""
         }
@@ -327,19 +322,21 @@ struct OnboardingView: View {
         guard let previousStep = OnboardingStep(rawValue: currentStep.rawValue - 1) else {
             return
         }
-        
-        withAnimation {
-            currentStep = previousStep
-            errorMessage = nil
+
+        // Leaving the pairing step abandons the attempt, so the TV's prompt does not linger.
+        if currentStep == .instructions && !controller.connectionState.isConnected {
+            controller.disconnect()
+            isConnecting = false
         }
+
+        move(to: previousStep)
+        errorMessage = nil
     }
     
     private func goNext() {
         switch currentStep {
         case .welcome:
-            withAnimation {
-                currentStep = .configuration
-            }
+            move(to: .configuration)
             
         case .configuration:
             // Save configuration and attempt connection
@@ -347,9 +344,7 @@ struct OnboardingView: View {
             
         case .instructions:
             if controller.connectionState == .connected {
-                withAnimation {
-                    currentStep = .success
-                }
+                move(to: .success)
             }
             
         case .success:
@@ -357,13 +352,23 @@ struct OnboardingView: View {
         }
     }
     
+    /// Step changes animate unless the user has asked macOS to reduce motion.
+    private func move(to step: OnboardingStep) {
+        if reduceMotion {
+            currentStep = step
+        } else {
+            withAnimation { currentStep = step }
+        }
+    }
+
     private func saveAndConnect() {
-        errorMessage = nil
+        errorMessage = InputValidation.tvName(tvName) ?? InputValidation.host(ipAddress) ?? InputValidation.macAddress(macAddress)
+        guard errorMessage == nil else { return }
         
         let config = TVConfiguration(
-            name: tvName,
-            ipAddress: ipAddress,
-            macAddress: macAddress,
+            name: tvName.trimmingCharacters(in: .whitespaces),
+            ipAddress: ipAddress.trimmingCharacters(in: .whitespaces),
+            macAddress: InputValidation.normalizedMACAddress(macAddress),
             preferredInput: preferredInput.rawValue,
             wakeWithMac: true,
             sleepWithMac: true,
@@ -374,28 +379,21 @@ struct OnboardingView: View {
         do {
             try controller.saveConfiguration(config)
             
-            // Move to instructions step
-            withAnimation {
-                currentStep = .instructions
-            }
-            
-            // Attempt connection
+            move(to: .instructions)
+
             isConnecting = true
             Task {
+                defer { isConnecting = false }
                 do {
                     try await controller.connect()
-                    await MainActor.run {
-                        isConnecting = false
+                    if currentStep == .instructions {
+                        move(to: .success)
                     }
                 } catch {
-                    await MainActor.run {
-                        isConnecting = false
-                        errorMessage = "Connection failed: \(error.localizedDescription)"
-                        // Go back to configuration
-                        withAnimation {
-                            currentStep = .configuration
-                        }
-                    }
+                    // Back was pressed: the attempt was abandoned on purpose.
+                    guard currentStep == .instructions else { return }
+                    errorMessage = error.localizedDescription
+                    move(to: .configuration)
                 }
             }
         } catch {
@@ -405,13 +403,11 @@ struct OnboardingView: View {
     
     private func skipOnboarding() {
         UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
-        dismiss()
         onComplete()
     }
     
     private func completeOnboarding() {
         UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
-        dismiss()
         onComplete()
     }
 }

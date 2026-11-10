@@ -11,9 +11,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
-    private var settingsWindow: NSWindow?
+    private var settingsWindowController: SettingsWindowController?
+    private var onboardingWindow: NSWindow?
     private var uxTestingWindow: NSWindow?
     private var controller: TVController!
+    private var displayLock: DisplayLockController!
     private let softwareUpdates = SoftwareUpdateController()
     private var eventMonitors: [Any] = []
     
@@ -24,10 +26,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Initialize controller
         controller = TVController()
+        displayLock = DisplayLockController(tv: controller, displayService: DisplayService())
+        displayLock.log = { [weak self] level, message, metadata in
+            self?.controller.diagnosticLogger.log(level: level, category: "DisplayLock", message: message, metadata: metadata)
+        }
 
         #if UX_TESTING_APP
         controller.applyUXTestingFixture()
         NSApp.setActivationPolicy(.regular)
+        if let directory = ProcessInfo.processInfo.environment["LGTV_UX_SNAPSHOT_DIR"] {
+            UXSnapshotRenderer(controller: controller, displayLock: displayLock).renderAll(to: URL(fileURLWithPath: directory))
+            NSApp.terminate(nil)
+            return
+        }
         showUXTestingWindow()
 
         logger.info("\("UX testing window launched successfully", privacy: .public)")
@@ -40,10 +51,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Set up status bar item
         setupStatusItem()
 
+        setupMainMenu()
+
         controller.connectionStateDidChange = { [weak self] state in
+            self?.displayLock.noteChange("connection")
             guard let statusItem = self?.statusItem else { return }
             StatusItemIconManager.updateStatusItem(statusItem, for: state)
         }
+        controller.foregroundDidChange = { [weak self] _ in
+            self?.displayLock.noteChange("foreground")
+        }
+        controller.configurationDidChange = { [weak self] _ in
+            self?.displayLock.profileDidChange()
+        }
+        displayLock.startObservingDisplays()
         
         // Set up popover with custom behavior
         setupPopover()
@@ -91,13 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        guard controller.connectionState.isDisconnected || controller.connectionState.hasError else {
-            return
-        }
-
-        Task {
-            await controller.ensureTVAwake(reason: "appActivated")
-        }
+        controller.handleAutomationTrigger(.appActivated)
         #endif
     }
     
@@ -116,9 +131,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             StatusItemIconManager.updateStatusItem(statusItem, for: controller.connectionState)
         }
         
-        // Set action
-        button.action = #selector(togglePopover)
+        // Left click shows the popover; right click (or Control-click) shows a short menu.
+        button.action = #selector(statusItemClicked)
         button.target = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         
         logger.info("Status bar item configured")
     }
@@ -138,17 +154,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.animates = true
         
         // Create hosting controller with MenuBarView
-        let contentView = MenuBarView(controller: controller, softwareUpdates: softwareUpdates) { [weak self] in
-            Task { @MainActor in
-                self?.hidePopover()
-                self?.showSettingsWindow()
-            }
+        let contentView = MenuBarView(controller: controller, displayLock: displayLock) { [weak self] pane in
+            self?.hidePopover()
+            self?.showSettingsWindow(pane: pane)
         }
-            .environment(\.dismissPopover, DismissPopoverAction { [weak self] in
-                Task { @MainActor in
-                    self?.hidePopover()
-                }
-            })
         
         let hostingController = NSHostingController(rootView: contentView)
         popover.contentViewController = hostingController
@@ -209,6 +218,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - Popover Actions
     
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        let isSecondaryClick = event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true
+        if isSecondaryClick {
+            hidePopover()
+            showStatusMenu()
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func showStatusMenu() {
+        guard let statusItem else { return }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        if softwareUpdates.isEnabled {
+            menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit LGTV Menu Bar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        // Attaching the menu only for this click keeps left click free for the popover.
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    @objc private func openSettings() {
+        showSettingsWindow(pane: nil)
+    }
+
+    @objc private func checkForUpdates() {
+        softwareUpdates.checkForUpdates()
+    }
+
+    /// An accessory app has no menu bar of its own, but text fields still rely on the Edit menu
+    /// for Cut, Copy and Paste, and Settings on the standard Command-comma.
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit LGTV Menu Bar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
     @objc private func togglePopover() {
         guard let popover = popover else { return }
         
@@ -230,13 +308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // CRITICAL: Make popover window key and activate app for proper focus
         // This ensures buttons, toggles, pickers work correctly
         popover.contentViewController?.view.window?.makeKey()
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
 
-        if controller.configuration != nil {
-            Task {
-                await controller.ensureTVAwake(reason: "menuOpened")
-            }
-        }
+        controller.handleAutomationTrigger(.menuOpened)
         
         logger.debug("Popover shown")
     }
@@ -246,26 +320,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logger.debug("Popover hidden")
     }
 
-    private func showSettingsWindow() {
-        if let settingsWindow {
-            settingsWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
+    private func showSettingsWindow(pane: SettingsWindowController.Pane?) {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(
+                controller: controller,
+                displayLock: displayLock,
+                softwareUpdates: softwareUpdates
+            )
         }
-
-        let settingsView = SettingsView(controller: controller, softwareUpdates: softwareUpdates)
-        let hostingController = NSHostingController(rootView: settingsView)
-
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = "Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.center()
-        window.setContentSize(NSSize(width: 480, height: 440))
-        window.isReleasedWhenClosed = false
-
-        settingsWindow = window
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        settingsWindowController?.show(pane: pane)
     }
     
     // MARK: - Onboarding
@@ -286,6 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showOnboarding() {
         let onboardingView = OnboardingView(controller: controller) { [weak self] in
             self?.logger.info("Onboarding completed")
+            self?.onboardingWindow?.close()
+            self?.onboardingWindow = nil
         }
         
         let hostingController = NSHostingController(rootView: onboardingView)
@@ -297,18 +362,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.setContentSize(NSSize(width: 500, height: 600))
         window.isReleasedWhenClosed = false
-        window.level = .floating
-        
-        // Show window modally
+        onboardingWindow = window
+
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         
         logger.info("Onboarding window displayed")
     }
 
     #if UX_TESTING_APP
     private func showUXTestingWindow() {
-        let rootView = UXTestingRootView(controller: controller)
+        let rootView = UXTestingRootView(controller: controller, displayLock: displayLock)
         let hostingController = NSHostingController(rootView: rootView)
 
         let window = NSWindow(contentViewController: hostingController)
@@ -321,34 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         uxTestingWindow = window
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
     }
     #endif
-}
-
-// MARK: - Environment Key for Dismiss Action
-
-/// Environment key for dismissing popover from SwiftUI views
-private struct DismissPopoverKey: EnvironmentKey {
-    static let defaultValue: DismissPopoverAction = DismissPopoverAction {}
-}
-
-extension EnvironmentValues {
-    var dismissPopover: DismissPopoverAction {
-        get { self[DismissPopoverKey.self] }
-        set { self[DismissPopoverKey.self] = newValue }
-    }
-}
-
-/// Action to dismiss the popover
-struct DismissPopoverAction: Sendable {
-    private let action: @Sendable () -> Void
-    
-    init(_ action: @escaping @Sendable () -> Void) {
-        self.action = action
-    }
-    
-    func callAsFunction() {
-        action()
-    }
 }

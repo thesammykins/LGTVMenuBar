@@ -21,7 +21,7 @@ SCREENSHOT_PATH="$ROOT_DIR/screenshots/ux-testing-window.png"
 SPARKLE_FRAMEWORK_SOURCE="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
 usage() {
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--screenshot]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--screenshot|--snapshots]" >&2
     exit 2
 }
 
@@ -85,7 +85,10 @@ copy_sparkle_framework() {
 }
 
 ensure_framework_rpath() {
-    if otool -l "$APP_BINARY" | grep -Fq "@executable_path/../Frameworks"; then
+    # Captured first: with pipefail, grep -q closing the pipe early can fail otool with SIGPIPE.
+    local load_commands
+    load_commands="$(otool -l "$APP_BINARY")"
+    if grep -Fq "@executable_path/../Frameworks" <<<"$load_commands"; then
         return
     fi
 
@@ -205,6 +208,14 @@ case "$MODE" in
         open_app
         wait_for_window
         stop_app
+        ;;
+    --snapshots|snapshots)
+        # Renders the menu and every Settings pane to PNGs from inside the app. Unlike
+        # --screenshot this needs no Screen Recording or Accessibility permission.
+        SNAPSHOT_DIR="$ROOT_DIR/screenshots/snapshots"
+        rm -rf "$SNAPSHOT_DIR"
+        LGTV_UX_SNAPSHOT_DIR="$SNAPSHOT_DIR" "$APP_BINARY"
+        echo "$SNAPSHOT_DIR"
         ;;
     --screenshot|screenshot)
         open_app

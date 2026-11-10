@@ -7,20 +7,26 @@ public protocol WebOSClientProtocol {
     var connectionState: ConnectionState { get }
     func connect(to configuration: TVConfiguration, stateChangeCallback: @escaping @Sendable (ConnectionState) -> Void) async throws
     func disconnect()
+    /// Sends a command and waits for the TV to confirm it. Throws if the TV rejects it or stays silent.
     func sendCommand(_ command: WebOSCommand) async throws
+    /// Sends an arbitrary SSAP request and returns the TV's confirmed reply.
+    func request(uri: String, payload: [String: Any]?) async throws -> SSAPReply
     func getPowerStatus() async throws -> TVPowerStatus
     func setCapabilityCallback(_ callback: @escaping @Sendable (TVCapabilities) -> Void)
     func setInputChangeCallback(_ callback: @escaping @Sendable (TVInputType) -> Void)
+    func setForegroundChangeCallback(_ callback: @escaping @Sendable (TVForeground) -> Void)
     func setVolumeChangeCallback(_ callback: @escaping @Sendable (Int, Bool) -> Void)
     func setInputListCallback(_ callback: @escaping @Sendable ([String: String]) -> Void)
     func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void)
     func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void)
+    /// Receives (level, message, metadata) for every connection lifecycle event.
+    func setLogCallback(_ callback: @escaping (String, String, [String: String]) -> Void)
 }
 
 /// Custom URLSession delegate for accepting self-signed certificates
 private final class InsecureURLSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        // Accept self-signed certificates for local TV connections
+        // LG TVs present a self-signed certificate; the pairing key, not TLS, authenticates the TV.
         if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
            let serverTrust = challenge.protectionSpace.serverTrust {
             completionHandler(.useCredential, URLCredential(trust: serverTrust))
@@ -30,102 +36,113 @@ private final class InsecureURLSessionDelegate: NSObject, URLSessionDelegate, @u
     }
 }
 
-/// WebSocket client for communicating with LG WebOS TVs
+/// WebSocket (SSAP) client for LG webOS TVs.
+///
+/// Every request is correlated to its reply by id and bounded by a timeout, so callers learn
+/// whether the TV actually accepted a command. Timeouts are driven by timers that resume the
+/// waiting continuation directly; nothing here relies on task cancellation reaching a callback API.
 @MainActor
 final class WebOSClient: WebOSClientProtocol {
+
+    struct Timeouts: Sendable {
+        /// Time allowed for the TV to answer the registration message at all.
+        var handshake: Duration = .seconds(10)
+        /// Time allowed for the viewer to accept the on-screen pairing prompt.
+        var pairingPrompt: Duration = .seconds(60)
+        /// Time allowed for a reply to an ordinary request.
+        var reply: Duration = .seconds(5)
+        /// Interval between liveness checks on an idle connection.
+        var keepAliveInterval: Duration = .seconds(45)
+
+        init(
+            handshake: Duration = .seconds(10),
+            pairingPrompt: Duration = .seconds(60),
+            reply: Duration = .seconds(5),
+            keepAliveInterval: Duration = .seconds(45)
+        ) {
+            self.handshake = handshake
+            self.pairingPrompt = pairingPrompt
+            self.reply = reply
+            self.keepAliveInterval = keepAliveInterval
+        }
+    }
+
+    private struct PendingRequest {
+        let uri: String
+        let continuation: CheckedContinuation<SSAPReply, Error>
+        let timeoutTask: Task<Void, Never>
+    }
+
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "WebOSClient")
-    
-    /// WebSocket connection to the TV
+
     private var webSocketTask: URLSessionWebSocketTask?
-    
-    /// URL session for WebSocket connections
     private let urlSession: URLSession
-    
-    /// URL session for SSL connections with self-signed certificate support
     private let sslURLSession: URLSession
-    
-    /// Keychain manager for storing client keys
     private let keychainManager: KeychainManagerProtocol
-    
-    /// Current connection state
+    private let endpoints: [WebOSConnectionEndpoint]
+    private let timeouts: Timeouts
+
     private var _connectionState = ConnectionState.disconnected
 
     /// Monotonic token used to ignore callbacks from stale socket attempts.
     private var connectionAttemptID: UInt64 = 0
-    
-    /// TV configuration
+
+    /// Bumped by `disconnect()` so an in-flight `connect()` stops instead of trying the next endpoint.
+    private var cancelGeneration: UInt64 = 0
+
     private var configuration: TVConfiguration?
-    
-    /// Callback for connection state changes
     private var stateChangeCallback: (@Sendable (ConnectionState) -> Void)?
-    
-    /// Callback for TV capability updates
     private var capabilityCallback: (@Sendable (TVCapabilities) -> Void)?
-    
-    /// Callback for TV input changes
     private var inputChangeCallback: (@Sendable (TVInputType) -> Void)?
-    
-    /// Callback for volume changes
+    private var foregroundChangeCallback: (@Sendable (TVForeground) -> Void)?
     private var volumeChangeCallback: (@Sendable (Int, Bool) -> Void)?
-    
-    /// Callback for input list with icons
     private var inputListCallback: (@Sendable ([String: String]) -> Void)?
-    
-    /// Callback for sound output changes
     private var soundOutputChangeCallback: (@Sendable (TVSoundOutput) -> Void)?
-
-    /// Callback for raw payload diagnostics
     private var diagnosticPayloadCallback: ((String, String) -> Void)?
-    
-    /// Handshake completion flag
-    private var handshakeCompleted = false
-    
-    /// Message counter for requests
-    private var messageCounter = 1
-    
-    /// Pending requests awaiting responses
-    private var pendingRequests: [String: CheckedContinuation<TVPowerStatus, Error>] = [:]
+    private var logCallback: ((String, String, [String: String]) -> Void)?
 
-    /// Continuation used while waiting for the TV to acknowledge registration.
+    private var handshakeCompleted = false
+    private var messageCounter = 1
+    private var pendingRequests: [String: PendingRequest] = [:]
     private var handshakeContinuation: CheckedContinuation<Void, Error>?
-    
-    /// Whether the current connection uses SSL
-    private var usesSSL: Bool = false
-    
-    /// Connection timeout in seconds
-    private let connectionTimeout: TimeInterval = 10.0
+    private var handshakeTimeoutTask: Task<Void, Never>?
+    private var keepAliveTask: Task<Void, Never>?
+    private var bootstrapTask: Task<Void, Never>?
+    private var usesSSL = false
+
+    /// Capabilities accumulated for the current connection.
+    private var capabilities = TVCapabilities()
 
     /// Optional test hook for observing connection state changes without a real socket.
     private var testStateChangeObserver: ((ConnectionState) -> Void)?
 
     /// Optional test hook for intercepting command sends without a live socket.
     private var testSendCommandHandler: ((WebOSCommand) async throws -> Void)?
-    
-    /// Current connection state
-    var connectionState: ConnectionState {
-        return _connectionState
-    }
-    
-    /// Initialize WebOSClient
-    init(keychainManager: KeychainManagerProtocol = KeychainManager()) {
+
+    var connectionState: ConnectionState { _connectionState }
+
+    init(
+        keychainManager: KeychainManagerProtocol = KeychainManager(),
+        endpoints: [WebOSConnectionEndpoint] = WebOSConnectionEndpoint.preferredOrder,
+        timeouts: Timeouts = Timeouts()
+    ) {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 30
         self.urlSession = URLSession(configuration: configuration)
-        
-        // Create SSL session with custom delegate for self-signed certificates
+
         let sslConfiguration = URLSessionConfiguration.default
         sslConfiguration.timeoutIntervalForRequest = 10
         sslConfiguration.timeoutIntervalForResource = 30
-        let delegate = InsecureURLSessionDelegate()
-        self.sslURLSession = URLSession(configuration: sslConfiguration, delegate: delegate, delegateQueue: nil)
-        
+        self.sslURLSession = URLSession(configuration: sslConfiguration, delegate: InsecureURLSessionDelegate(), delegateQueue: nil)
+
         self.keychainManager = keychainManager
-        
-        logger.info("WebOSClient initialized")
+        self.endpoints = endpoints
+        self.timeouts = timeouts
     }
 
-    /// Test-only initializer hook for observing internal state changes.
+    // MARK: - Test Hooks
+
     internal func setTestStateChangeObserver(_ observer: @escaping (ConnectionState) -> Void) {
         self.testStateChangeObserver = observer
     }
@@ -140,7 +157,7 @@ final class WebOSClient: WebOSClientProtocol {
     }
 
     internal func handleMessageForTesting(_ string: String) async {
-        await handleMessage(string)
+        handleMessage(string)
     }
 
     @discardableResult
@@ -151,158 +168,115 @@ final class WebOSClient: WebOSClientProtocol {
     internal func emitConnectionStateForTesting(_ state: ConnectionState, attemptID: UInt64) {
         publishConnectionState(state, attemptID: attemptID)
     }
-    
+
     deinit {
-        _connectionState = .disconnected
         webSocketTask?.cancel()
-        webSocketTask = nil
     }
-    
-    /// Connect to the TV using WebSocket
-    /// - Parameters:
-    ///   - configuration: TV configuration containing connection details
-    ///   - stateChangeCallback: Closure called when connection state changes
-    /// - Throws: `LGTVError.webosError` if connection fails
+
+    // MARK: - Connection
+
     func connect(to configuration: TVConfiguration, stateChangeCallback: @escaping @Sendable (ConnectionState) -> Void) async throws {
-        // Allow reconnection from disconnected or error states
-        // If a registration handshake is already active, do not reset the socket.
+        // A registration handshake in flight must not be reset: doing so re-raises the pairing prompt.
         if _connectionState == .connected || _connectionState.isTransitioning {
             logger.warning("Connection already active")
             return
         }
-        
-        // Clean up any existing connection state before reconnecting (e.g., recovering from error state)
+
         if _connectionState != .disconnected {
-            logger.info("Cleaning up previous connection state before reconnecting")
             _ = beginConnectionAttempt()
-            webSocketTask?.cancel()
-            webSocketTask = nil
-            handshakeCompleted = false
-            failHandshake(LGTVError.webosError("Connection reset"))
-            // Fail any pending requests
-            for (_, continuation) in pendingRequests {
-                continuation.resume(throwing: LGTVError.webosError("Connection reset"))
-            }
-            pendingRequests.removeAll()
+            tearDownSocket(reason: LGTVError.webosError("Connection reset"))
         }
-        
-        logger.info("Connecting to \(configuration.name) at \(configuration.ipAddress)")
-        
+
+        log("info", "Connecting", ["host": configuration.ipAddress])
+
         self.configuration = configuration
         self.stateChangeCallback = stateChangeCallback
-        
+        let generation = cancelGeneration
+
         var lastError: Error?
 
-        for endpoint in WebOSConnectionEndpoint.preferredOrder {
+        for endpoint in endpoints {
             let attemptID = beginConnectionAttempt()
             publishConnectionState(.connecting, attemptID: attemptID)
 
             do {
-                logger.debug("Attempting \(endpoint.scheme, privacy: .public) connection on port \(endpoint.port)")
                 try await connectWithProtocol(ipAddress: configuration.ipAddress, endpoint: endpoint, attemptID: attemptID)
-                self.usesSSL = endpoint.usesSSL
-                logger.info("\("Successfully connected", privacy: .public) via \(endpoint.scheme, privacy: .public) to \(configuration.name)")
+                log("info", "Connected", ["scheme": endpoint.scheme, "port": "\(endpoint.port)"])
                 return
             } catch {
-                logger.debug("\(endpoint.scheme, privacy: .public) connection failed: \(error.localizedDescription, privacy: .public)")
                 lastError = error
-                webSocketTask?.cancel()
-                webSocketTask = nil
-                handshakeCompleted = false
-                failHandshake(error, attemptID: attemptID)
+                log("warning", "Endpoint failed", ["scheme": endpoint.scheme, "port": "\(endpoint.port)", "error": error.localizedDescription])
+
+                guard generation == cancelGeneration else {
+                    // disconnect() ran while we were connecting; it already cleaned up.
+                    throw LGTVError.connectionFailed("Connection cancelled")
+                }
+
+                if isCurrentConnectionAttempt(attemptID) {
+                    tearDownSocket(reason: error)
+                }
+
+                // Trying the next endpoint after a pairing failure would put a second prompt on the TV.
+                if let lgError = error as? LGTVError, lgError == .pairingRejected || lgError == .pairingTimeout {
+                    publishConnectionState(.disconnected)
+                    throw lgError
+                }
             }
         }
-        
-        // Both connection attempts failed
+
         publishConnectionState(.disconnected)
         throw LGTVError.webosError("Failed to connect to TV: \(lastError?.localizedDescription ?? "Unknown error")")
     }
-    
-    /// Connect to the TV using a specific WebOS endpoint.
-    /// - Parameters:
-    ///   - ipAddress: IP address of the TV
-    ///   - endpoint: Scheme and port to try for the WebSocket connection
-    ///   - attemptID: Connection attempt identifier used to ignore stale callbacks
-    /// - Throws: `LGTVError.webosError` if connection fails
+
     private func connectWithProtocol(ipAddress: String, endpoint: WebOSConnectionEndpoint, attemptID: UInt64) async throws {
         guard let wsURL = endpoint.url(for: ipAddress) else {
             throw LGTVError.webosError("Invalid WebSocket URL")
         }
-        
-        // Create WebSocket task with appropriate session
+
         let session = endpoint.usesSSL ? sslURLSession : urlSession
-        webSocketTask = session.webSocketTask(with: wsURL)
-        webSocketTask?.resume()
-        
-        // Start message handling
+        let socket = session.webSocketTask(with: wsURL)
+        usesSSL = endpoint.usesSSL
+        webSocketTask = socket
+        socket.resume()
+
         Task { [attemptID] in
-            await handleMessages(attemptID: attemptID)
+            await receiveMessages(from: socket, attemptID: attemptID)
         }
 
         publishConnectionState(.registering, attemptID: attemptID)
-        
-        // Perform handshake with timeout
-        try await withTimeout(connectionTimeout) {
-            try await self.performHandshake(attemptID: attemptID)
-        }
+        try await performHandshake(attemptID: attemptID)
     }
-    
-    /// Execute an async operation with a timeout
-    /// - Parameters:
-    ///   - timeout: Timeout duration in seconds
-    ///   - operation: The async operation to execute
-    /// - Returns: Result of the operation
-    /// - Throws: Error if operation fails or times out
-    private func withTimeout<T: Sendable>(_ timeout: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            // Add operation task
-            group.addTask {
-                try await operation()
-            }
-            
-            // Add timeout task
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                throw LGTVError.webosError("Connection timeout")
-            }
-            
-            // Return first result (operation or timeout)
-            guard let result = try await group.next() else {
-                throw LGTVError.webosError("Task group failed")
-            }
-            
-            // Cancel remaining tasks
-            group.cancelAll()
-            
-            return result
-        }
-    }
-    
-    /// Disconnect from the TV
+
     func disconnect() {
+        cancelGeneration &+= 1
         let attemptID = beginConnectionAttempt()
         guard _connectionState != .disconnected else {
             return
         }
-        
-        logger.info("\("Disconnecting from TV", privacy: .public)")
-        
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        webSocketTask = nil
 
-        failHandshake(LGTVError.webosError("Connection closed"), attemptID: attemptID)
-        
-        handshakeCompleted = false
-        
-        // Fail all pending requests
-        for (_, continuation) in pendingRequests {
-            continuation.resume(throwing: LGTVError.webosError("Connection closed"))
-        }
-        pendingRequests.removeAll()
-        
+        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        tearDownSocket(reason: LGTVError.webosError("Connection closed"))
         publishConnectionState(.disconnected, attemptID: attemptID)
-        
-        logger.info("\("Disconnected from TV", privacy: .public)")
+        log("info", "Disconnected", [:])
+    }
+
+    /// Drops the socket and fails everything waiting on it. Does not publish a state.
+    private func tearDownSocket(reason: Error) {
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
+        bootstrapTask?.cancel()
+        bootstrapTask = nil
+        webSocketTask?.cancel()
+        webSocketTask = nil
+        handshakeCompleted = false
+        failHandshake(reason)
+
+        let requestsToFail = pendingRequests
+        pendingRequests.removeAll()
+        for (_, pending) in requestsToFail {
+            pending.timeoutTask.cancel()
+            pending.continuation.resume(throwing: reason)
+        }
     }
 
     private func handleConnectionFailure(_ error: Error, attemptID: UInt64? = nil) {
@@ -311,30 +285,18 @@ final class WebOSClient: WebOSClientProtocol {
             return
         }
 
-        logger.warning("Invalidating WebOS connection after transport failure: \(error.localizedDescription, privacy: .public)")
+        // The first failure is the cause; what follows (the receive loop noticing the socket
+        // it was reading from is gone) would only replace the reason with a less useful one.
+        guard !_connectionState.hasError else { return }
 
+        log("warning", "Connection lost", ["error": error.localizedDescription, "state": _connectionState.description])
         webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        handshakeCompleted = false
-        failHandshake(error, attemptID: attemptID)
-
-        let requestsToFail = pendingRequests
-        pendingRequests.removeAll()
-        for (_, continuation) in requestsToFail {
-            continuation.resume(throwing: error)
-        }
-
-        let shouldNotify = !_connectionState.hasError
-        if shouldNotify {
-            publishConnectionState(.error(error), attemptID: attemptID)
-        } else {
-            _connectionState = .error(error)
-        }
+        tearDownSocket(reason: error)
+        publishConnectionState(.error(error), attemptID: attemptID)
     }
-    
-    /// Send a command to the TV
-    /// - Parameter command: Command to send
-    /// - Throws: `LGTVError.webosError` if sending fails
+
+    // MARK: - Requests
+
     func sendCommand(_ command: WebOSCommand) async throws {
         guard _connectionState == .connected, handshakeCompleted else {
             throw LGTVError.webosError("Not connected to TV")
@@ -350,75 +312,153 @@ final class WebOSClient: WebOSClientProtocol {
                 throw sendError
             }
         }
-        
-        logger.debug("Sending command: \(String(describing: command))")
-        
+
+        let descriptor = Self.descriptor(for: command)
         do {
-            let messageDict = try createCommandMessage(command)
-            let data = try JSONSerialization.data(withJSONObject: messageDict)
-            let string = String(data: data, encoding: .utf8)!
-
-            guard let webSocketTask else {
-                let error = LGTVError.webosError("WebSocket connection is unavailable")
-                handleConnectionFailure(error)
-                throw error
-            }
-
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                webSocketTask.send(.string(string)) { [weak self] error in
-                    if let error {
-                        Task { @MainActor [weak self] in
-                            guard let self else {
-                                continuation.resume(throwing: error)
-                                return
-                            }
-                            self.logger.error("Failed to send command: \(error.localizedDescription, privacy: .public)")
-                            self.handleConnectionFailure(error)
-                            continuation.resume(throwing: error)
-                        }
-                    } else {
-                        continuation.resume()
-                    }
-                }
-            }
-            
-        } catch let error as LGTVError {
-            throw error
+            _ = try await perform(type: descriptor.type, uri: descriptor.uri, payload: descriptor.payload)
         } catch {
+            // Endpoint names differ between firmware generations; try the other known name.
+            if case LGTVError.commandFailed = error, let legacyURI = Self.legacyURI(for: command) {
+                log("info", "Endpoint rejected; retrying its older name", ["uri": descriptor.uri, "legacy": legacyURI, "error": error.localizedDescription])
+                _ = try await perform(type: "request", uri: legacyURI, payload: nil)
+                return
+            }
+            // A TV that is switching off often closes the socket instead of replying.
+            if case .powerOff = command, Self.isSilence(error) {
+                log("info", "Power off sent; TV closed without replying", ["error": error.localizedDescription])
+                return
+            }
+            if let lgError = error as? LGTVError {
+                throw lgError
+            }
             throw LGTVError.webosError("Failed to send command: \(error.localizedDescription)")
         }
     }
 
-    func getPowerStatus() async throws -> TVPowerStatus {
-        try await sendPowerStatusRequest()
+    func request(uri: String, payload: [String: Any]?) async throws -> SSAPReply {
+        try await perform(type: "request", uri: uri, payload: payload)
     }
-    
-    /// Set callback for TV capability updates
-    /// - Parameter callback: Closure called when capabilities are updated
+
+    func getPowerStatus() async throws -> TVPowerStatus {
+        guard _connectionState == .connected, handshakeCompleted else {
+            throw LGTVError.webosError("Not connected to TV")
+        }
+
+        if let testSendCommandHandler {
+            do {
+                try await testSendCommandHandler(.getPowerState)
+                return TVPowerStatus()
+            } catch {
+                handleConnectionFailure(error)
+                throw error
+            }
+        }
+
+        let descriptor = Self.descriptor(for: .getPowerState)
+        let reply = try await perform(type: descriptor.type, uri: descriptor.uri, payload: descriptor.payload)
+        return TVPowerStatus(payload: reply.payload)
+    }
+
+    private static func legacyURI(for command: WebOSCommand) -> String? {
+        switch command {
+        case .mute: return "ssap://audio/mute"
+        case .unmute: return "ssap://audio/unmute"
+        case .getInputList: return "ssap://tv/getInputList"
+        default: return nil
+        }
+    }
+
+    private static func isSilence(_ error: Error) -> Bool {
+        guard let lgError = error as? LGTVError else { return true }
+        switch lgError {
+        case .requestTimedOut, .webosError, .connectionFailed, .networkError: return true
+        default: return false
+        }
+    }
+
+    /// Sends one frame and suspends until the matching reply, an error frame, a timeout or a
+    /// connection failure. Exactly one of those resumes the caller.
+    private func perform(type: String, uri: String, payload: [String: Any]?) async throws -> SSAPReply {
+        guard _connectionState == .connected, handshakeCompleted else {
+            throw LGTVError.webosError("Not connected to TV")
+        }
+
+        guard let webSocketTask else {
+            let error = LGTVError.webosError("WebSocket connection is unavailable")
+            handleConnectionFailure(error)
+            throw error
+        }
+
+        let requestID = "req_\(messageCounter)"
+        messageCounter += 1
+        // A send that fails after a reconnect belongs to the old socket and must not take the
+        // new one down with it.
+        let attemptID = connectionAttemptID
+
+        var message: [String: Any] = ["id": requestID, "type": type, "uri": uri]
+        if let payload {
+            message["payload"] = payload
+        }
+
+        guard JSONSerialization.isValidJSONObject(message),
+              let data = try? JSONSerialization.data(withJSONObject: message),
+              let string = String(data: data, encoding: .utf8) else {
+            throw LGTVError.commandFailed("Request for \(uri) could not be encoded")
+        }
+
+        logger.debug("Sending \(type, privacy: .public) \(uri, privacy: .public)")
+        let replyTimeout = timeouts.reply
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let timeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: replyTimeout)
+                guard !Task.isCancelled else { return }
+                self?.failPendingRequest(requestID, with: LGTVError.requestTimedOut(uri))
+            }
+            pendingRequests[requestID] = PendingRequest(uri: uri, continuation: continuation, timeoutTask: timeoutTask)
+
+            webSocketTask.send(.string(string)) { [weak self] error in
+                guard let error else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.failPendingRequest(requestID, with: error)
+                    self.handleConnectionFailure(error, attemptID: attemptID)
+                }
+            }
+        }
+    }
+
+    private func failPendingRequest(_ requestID: String, with error: Error) {
+        guard let pending = pendingRequests.removeValue(forKey: requestID) else { return }
+        pending.timeoutTask.cancel()
+        if case LGTVError.requestTimedOut = error {
+            log("warning", "Request timed out", ["uri": pending.uri])
+        }
+        pending.continuation.resume(throwing: error)
+    }
+
+    // MARK: - Callback Registration
+
     func setCapabilityCallback(_ callback: @escaping @Sendable (TVCapabilities) -> Void) {
         self.capabilityCallback = callback
     }
-    
-    /// Set callback for TV input changes
-    /// - Parameter callback: Closure called when input changes
+
     func setInputChangeCallback(_ callback: @escaping @Sendable (TVInputType) -> Void) {
         self.inputChangeCallback = callback
     }
-    
-    /// Set callback for volume changes
-    /// - Parameter callback: Closure called when volume changes (volume level, isMuted)
+
+    func setForegroundChangeCallback(_ callback: @escaping @Sendable (TVForeground) -> Void) {
+        self.foregroundChangeCallback = callback
+    }
+
     func setVolumeChangeCallback(_ callback: @escaping @Sendable (Int, Bool) -> Void) {
         self.volumeChangeCallback = callback
     }
-    
-    /// Set callback for input list updates
-    /// - Parameter callback: Closure called when input list is received (inputId -> icon)
+
     func setInputListCallback(_ callback: @escaping @Sendable ([String: String]) -> Void) {
         self.inputListCallback = callback
     }
-    
-    /// Set callback for sound output changes
-    /// - Parameter callback: Closure called when sound output changes
+
     func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void) {
         self.soundOutputChangeCallback = callback
     }
@@ -426,8 +466,12 @@ final class WebOSClient: WebOSClientProtocol {
     func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void) {
         self.diagnosticPayloadCallback = callback
     }
-    
-    // MARK: - Private Methods
+
+    func setLogCallback(_ callback: @escaping (String, String, [String: String]) -> Void) {
+        self.logCallback = callback
+    }
+
+    // MARK: - State
 
     @discardableResult
     private func beginConnectionAttempt() -> UInt64 {
@@ -450,24 +494,28 @@ final class WebOSClient: WebOSClientProtocol {
         stateChangeCallback?(state)
         testStateChangeObserver?(state)
     }
-    
-    /// Perform handshake with the TV
+
+    private func log(_ level: String, _ message: String, _ metadata: [String: String]) {
+        switch level {
+        case "error": logger.error("\(message, privacy: .public) \(metadata, privacy: .public)")
+        case "warning": logger.warning("\(message, privacy: .public) \(metadata, privacy: .public)")
+        default: logger.info("\(message, privacy: .public) \(metadata, privacy: .public)")
+        }
+        logCallback?(level, message, metadata)
+    }
+
+    // MARK: - Handshake
+
     private func performHandshake(attemptID: UInt64) async throws {
         guard isCurrentConnectionAttempt(attemptID) else {
             throw LGTVError.webosError("Connection attempt superseded")
         }
 
-        logger.debug("Performing handshake")
-        
-        // Check if we have a stored client key for this TV
         var existingClientKey: String?
         if let ipAddress = configuration?.ipAddress {
             existingClientKey = try? keychainManager.loadClientKey(for: ipAddress)
-            if existingClientKey != nil {
-                logger.debug("Found existing client key for \(ipAddress)")
-            }
         }
-        
+
         var payload: [String: Any] = [
             "forcePairing": false,
             "pairingType": "PROMPT",
@@ -510,23 +558,32 @@ final class WebOSClient: WebOSClientProtocol {
                 "appId": "com.lgtvmenubar.app"
             ]
         ]
-        
-        // Include client key if we have one
+
         if let clientKey = existingClientKey {
             payload["client-key"] = clientKey
         }
-        
+
         let handshakeMessage: [String: Any] = [
             "id": "register_\(messageCounter)",
             "type": "register",
             "payload": payload
         ]
-        
+        messageCounter += 1
+
         let data = try JSONSerialization.data(withJSONObject: handshakeMessage)
-        let string = String(data: data, encoding: .utf8)!
-        
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw LGTVError.webosError("Registration message could not be encoded")
+        }
+
+        log("info", "Registering", ["hasClientKey": "\(existingClientKey != nil)"])
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             self.handshakeContinuation = continuation
+            self.armHandshakeTimeout(
+                after: timeouts.handshake,
+                error: LGTVError.connectionFailed("The TV did not answer the registration request"),
+                attemptID: attemptID
+            )
 
             guard let webSocketTask else {
                 self.failHandshake(LGTVError.webosError("WebSocket connection is unavailable"), attemptID: attemptID)
@@ -535,252 +592,278 @@ final class WebOSClient: WebOSClientProtocol {
 
             webSocketTask.send(.string(string)) { [weak self] error in
                 guard let self, let error else { return }
-
                 Task { @MainActor in
                     self.failHandshake(error, attemptID: attemptID)
                 }
             }
         }
-        
-        logger.debug("Handshake completed")
     }
-    
-    /// Handle incoming WebSocket messages
-    private func handleMessages(attemptID: UInt64) async {
-        while isCurrentConnectionAttempt(attemptID) && (_connectionState == .connecting || _connectionState == .registering || _connectionState == .connected) {
-            do {
-                let message = try await webSocketTask?.receive()
-                
-                switch message {
-                case .string(let string):
-                    await handleMessage(string, attemptID: attemptID)
-                case .data(let data):
-                    if let string = String(data: data, encoding: .utf8) {
-                        await handleMessage(string, attemptID: attemptID)
-                    }
-                case .none:
-                    break
-                @unknown default:
-                    logger.warning("Unknown message type received")
-                }
-                
-            } catch {
-                logger.error("Error receiving message: \(error.localizedDescription, privacy: .public)")
 
-                if isCurrentConnectionAttempt(attemptID) && _connectionState != .disconnected {
-                    handleConnectionFailure(error, attemptID: attemptID)
-                }
-                break
+    private func armHandshakeTimeout(after duration: Duration, error: LGTVError, attemptID: UInt64) {
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            self?.failHandshake(error, attemptID: attemptID)
+        }
+    }
+
+    private func failHandshake(_ error: Error, attemptID: UInt64? = nil) {
+        guard isCurrentConnectionAttempt(attemptID) else { return }
+        guard let handshakeContinuation else { return }
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        self.handshakeContinuation = nil
+        handshakeContinuation.resume(throwing: error)
+    }
+
+    /// Replies to the registration message other than `registered`.
+    private func handleRegistrationReply(type: String, messageDict: [String: Any], attemptID: UInt64?) {
+        guard handshakeContinuation != nil, isCurrentConnectionAttempt(attemptID) else { return }
+        let payload = messageDict["payload"] as? [String: Any] ?? [:]
+
+        if type == "error" {
+            let text = (messageDict["error"] as? String) ?? (payload["errorText"] as? String) ?? "Registration failed"
+            log("warning", "Registration refused", ["error": text])
+            let lowered = text.lowercased()
+            if lowered.contains("403") || lowered.contains("reject") || lowered.contains("denied") || lowered.contains("cancel") {
+                failHandshake(LGTVError.pairingRejected, attemptID: attemptID)
+            } else if lowered.contains("timeout") || lowered.contains("timed out") {
+                failHandshake(LGTVError.pairingTimeout, attemptID: attemptID)
+            } else {
+                failHandshake(LGTVError.connectionFailed(text), attemptID: attemptID)
             }
+            return
+        }
+
+        if (payload["pairingType"] as? String)?.uppercased() == "PROMPT", let attemptID {
+            log("info", "TV is showing the pairing prompt", [:])
+            publishConnectionState(.awaitingPairing, attemptID: attemptID)
+            armHandshakeTimeout(after: timeouts.pairingPrompt, error: LGTVError.pairingTimeout, attemptID: attemptID)
         }
     }
-    
-    /// Handle a received message
-    private func handleMessage(_ string: String, attemptID: UInt64? = nil) async {
-        guard isCurrentConnectionAttempt(attemptID) else {
-            logger.debug("Ignoring stale WebOS message")
-            return
-        }
 
-        guard let data = string.data(using: .utf8),
-              let messageDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            logger.warning("Failed to decode message: \(string)")
-            return
-        }
-        
-        let messageType = messageDict["type"] as? String ?? "unknown"
-        logger.debug("Received message: \(messageType)")
-        
-        switch messageType {
-        case "registered":
-            await handleRegisteredMessage(messageDict, attemptID: attemptID)
-        case "response":
-            await handleResponseMessage(messageDict)
-        case "push":
-            await handlePushMessage(messageDict)
-        default:
-            logger.debug("Unhandled message type: \(messageType)")
-        }
-    }
-    
-    /// Handle registered message
-    private func handleRegisteredMessage(_ messageDict: [String: Any], attemptID: UInt64? = nil) async {
-        guard isCurrentConnectionAttempt(attemptID) else {
-            logger.debug("Ignoring stale WebOS registered message")
-            return
-        }
+    private func handleRegisteredMessage(_ messageDict: [String: Any], attemptID: UInt64?) {
+        guard isCurrentConnectionAttempt(attemptID) else { return }
 
-        logger.info("\("Successfully registered with TV", privacy: .public)")
-
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
         handshakeCompleted = true
+        capabilities = TVCapabilities()
+        capabilities.usesSSL = usesSSL
         publishConnectionState(.connected, attemptID: attemptID)
 
         if let handshakeContinuation {
             self.handshakeContinuation = nil
             handshakeContinuation.resume()
         }
-        
-        // Extract and save client key if present
+
         if let payload = messageDict["payload"] as? [String: Any],
            let clientKey = payload["client-key"] as? String,
            let ipAddress = configuration?.ipAddress {
             do {
                 try keychainManager.saveClientKey(clientKey, for: ipAddress)
-                logger.debug("Saved client key for \(ipAddress)")
             } catch {
-                logger.error("Failed to save client key: \(error.localizedDescription, privacy: .public)")
+                log("error", "Failed to save client key", ["error": error.localizedDescription])
             }
         }
-        
-        // Request TV capabilities
-        try? await sendCommand(WebOSCommand.getForegroundAppInfo)
-        try? await sendCommand(WebOSCommand.getInputList)
-        
-        // Query current foreground app immediately (one-time, not subscription)
-        try? await sendCommand(WebOSCommand.getCurrentForegroundAppInfo)
-        
-        // Subscribe to volume changes (will push updates when volume changes)
-        try? await sendCommand(WebOSCommand.subscribeVolume)
-        
-        // Subscribe to sound output changes
-        try? await sendCommand(WebOSCommand.subscribeSoundOutput)
-        
-        // Query initial sound output state (subscription may not send initial value)
-        try? await sendCommand(WebOSCommand.getSoundOutput)
-    }
-    
-    /// Handle response message
-    private func handleResponseMessage(_ messageDict: [String: Any]) async {
-        guard let payload = messageDict["payload"] as? [String: Any] else { return }
 
-        resumePendingRequestIfNeeded(messageDict: messageDict, payload: payload)
-
-        // Debug: log full payload for diagnosis
-        logger.debug("Response payload keys: \(payload.keys.sorted())")
-
-        if let callback = diagnosticPayloadCallback {
-            callback("response", diagnosticPayloadJSON(from: payload))
+        // The receive loop is the caller here, and confirmed requests need it to keep reading, so
+        // the session bootstrap must run on its own task.
+        bootstrapTask?.cancel()
+        bootstrapTask = Task { @MainActor [weak self] in
+            await self?.bootstrapSession(attemptID: attemptID)
         }
-        
-        // Check for volume data in response
+
+        if webSocketTask != nil {
+            startKeepAlive(attemptID: attemptID)
+        }
+    }
+
+    private func bootstrapSession(attemptID: UInt64?) async {
+        let commands: [WebOSCommand] = [
+            .getForegroundAppInfo,
+            .getInputList,
+            .subscribeVolume,
+            .subscribeSoundOutput,
+            .getSoundOutput,
+            .getSystemInfo
+        ]
+
+        for command in commands {
+            guard !Task.isCancelled, isCurrentConnectionAttempt(attemptID), _connectionState == .connected else { return }
+            do {
+                try await sendCommand(command)
+            } catch {
+                // Older or newer firmware may lack an endpoint; the session is still usable.
+                log("info", "Bootstrap request not honoured", ["command": "\(command)", "error": error.localizedDescription])
+            }
+        }
+    }
+
+    /// Detects a half-open socket. A WebSocket ping is avoided because not every webOS build
+    /// answers pings; a cheap read every TV supports is the safer liveness probe. Only silence
+    /// counts as failure, never an error reply.
+    private func startKeepAlive(attemptID: UInt64?) {
+        keepAliveTask?.cancel()
+        let interval = timeouts.keepAliveInterval
+        keepAliveTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self,
+                      self.isCurrentConnectionAttempt(attemptID),
+                      self._connectionState == .connected else { return }
+                do {
+                    _ = try await self.perform(type: "request", uri: "ssap://audio/getVolume", payload: nil)
+                } catch LGTVError.requestTimedOut {
+                    guard self.isCurrentConnectionAttempt(attemptID), self._connectionState == .connected else { return }
+                    self.handleConnectionFailure(LGTVError.connectionFailed("The TV stopped responding"), attemptID: attemptID)
+                    return
+                } catch {
+                    continue
+                }
+            }
+        }
+    }
+
+    // MARK: - Receiving
+
+    private func receiveMessages(from socket: URLSessionWebSocketTask, attemptID: UInt64) async {
+        while isCurrentConnectionAttempt(attemptID) && (_connectionState.isTransitioning || _connectionState == .connected) {
+            do {
+                let message = try await socket.receive()
+                guard isCurrentConnectionAttempt(attemptID) else { return }
+
+                switch message {
+                case .string(let string):
+                    handleMessage(string, attemptID: attemptID)
+                case .data(let data):
+                    if let string = String(data: data, encoding: .utf8) {
+                        handleMessage(string, attemptID: attemptID)
+                    }
+                @unknown default:
+                    logger.warning("Unknown message type received")
+                }
+            } catch {
+                if isCurrentConnectionAttempt(attemptID) && _connectionState != .disconnected {
+                    handleConnectionFailure(error, attemptID: attemptID)
+                }
+                return
+            }
+        }
+    }
+
+    private func handleMessage(_ string: String, attemptID: UInt64? = nil) {
+        guard isCurrentConnectionAttempt(attemptID) else { return }
+
+        guard let data = string.data(using: .utf8),
+              let messageDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            logger.warning("Failed to decode message")
+            return
+        }
+
+        let messageType = messageDict["type"] as? String ?? "unknown"
+        let messageID = messageDict["id"] as? String ?? ""
+
+        switch messageType {
+        case "registered":
+            handleRegisteredMessage(messageDict, attemptID: attemptID)
+        case "response", "error":
+            if messageID.hasPrefix("register_") {
+                handleRegistrationReply(type: messageType, messageDict: messageDict, attemptID: attemptID)
+                return
+            }
+            let payload = messageDict["payload"] as? [String: Any] ?? [:]
+            resolvePendingRequest(id: messageID, type: messageType, messageDict: messageDict, payload: payload)
+            if messageType == "response" {
+                diagnosticPayloadCallback?("response", SSAPReply(payload: payload).jsonString)
+                applyStatePayload(payload)
+            }
+        case "push":
+            let payload = messageDict["payload"] as? [String: Any] ?? [:]
+            diagnosticPayloadCallback?("push", SSAPReply(payload: payload).jsonString)
+            applyStatePayload(payload)
+        default:
+            logger.debug("Unhandled message type: \(messageType, privacy: .public)")
+        }
+    }
+
+    private func resolvePendingRequest(id: String, type: String, messageDict: [String: Any], payload: [String: Any]) {
+        guard let pending = pendingRequests.removeValue(forKey: id) else { return }
+        pending.timeoutTask.cancel()
+
+        if type == "error" {
+            let text = (messageDict["error"] as? String) ?? (payload["errorText"] as? String) ?? "Request failed"
+            log("warning", "TV rejected request", ["uri": pending.uri, "error": text])
+            pending.continuation.resume(throwing: LGTVError.commandFailed("\(text) (\(pending.uri))"))
+            return
+        }
+
+        if let returnValue = payload["returnValue"] as? Bool, returnValue == false {
+            let errorText = payload["errorText"] as? String
+            let errorCode = (payload["errorCode"] as? String) ?? (payload["errorCode"] as? Int).map(String.init)
+            let detail = [errorText, errorCode].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+            log("warning", "TV rejected request", ["uri": pending.uri, "error": detail])
+            pending.continuation.resume(throwing: LGTVError.commandFailed(detail.isEmpty ? "WebOS request failed (\(pending.uri))" : "\(detail) (\(pending.uri))"))
+            return
+        }
+
+        pending.continuation.resume(returning: SSAPReply(payload: payload))
+    }
+
+    /// Updates observable TV state from any reply or subscription update that carries it.
+    private func applyStatePayload(_ payload: [String: Any]) {
         if let volume = payload["volume"] as? Int {
-            let isMuted = payload["muted"] as? Bool ?? false
+            let isMuted = payload["muted"] as? Bool ?? payload["mute"] as? Bool ?? false
             volumeChangeCallback?(volume, isMuted)
-            logger.debug("Volume update: \(volume), muted: \(isMuted)")
         } else if let volumeStatus = payload["volumeStatus"] as? [String: Any],
                   let volume = volumeStatus["volume"] as? Int {
             let isMuted = volumeStatus["muteStatus"] as? Bool ?? volumeStatus["muted"] as? Bool ?? false
             volumeChangeCallback?(volume, isMuted)
-            logger.debug("Volume update from volumeStatus: \(volume), muted: \(isMuted)")
         }
-        
-        // Check for foreground app data (current input) in response
-        if let appId = extractAppId(from: payload) {
-            if let inputType = mapAppIdToInputType(appId) {
-                inputChangeCallback?(inputType)
-                logger.debug("Current input from appId: \(appId) -> \(inputType.displayName)")
+
+        if let appId = extractAppId(from: payload), let foreground = TVForeground.from(appId: appId) {
+            foregroundChangeCallback?(foreground)
+            if let input = foreground.input {
+                inputChangeCallback?(input)
             }
         }
 
-        if let inputSource = extractInputSource(from: payload) {
-            let inputType = mapInputSourceToType(inputSource)
+        if let inputSource = extractInputSource(from: payload), let inputType = mapInputSourceToType(inputSource) {
+            foregroundChangeCallback?(.input(inputType))
             inputChangeCallback?(inputType)
-            logger.debug("Current input from input source: \(inputSource) -> \(inputType.displayName)")
         }
-        
-        // Check for input list data in response (from getInputList / getExternalInputList)
+
         if let devices = payload["devices"] as? [[String: Any]] {
             var inputIcons: [String: String] = [:]
+            var inputs: [TVInputInfo] = []
             for device in devices {
-                if let id = device["id"] as? String,
-                   let icon = device["icon"] as? String {
-                    inputIcons[id] = icon
-                    logger.debug("Input \(id) has icon: \(icon)")
-                }
+                guard let id = device["id"] as? String else { continue }
+                let icon = device["icon"] as? String ?? ""
+                inputIcons[id] = icon
+                inputs.append(TVInputInfo(
+                    id: id,
+                    label: device["label"] as? String ?? id,
+                    icon: icon,
+                    isConnected: device["connected"] as? Bool ?? false
+                ))
             }
-            if !inputIcons.isEmpty {
+            if !inputs.isEmpty {
+                capabilities.inputs = inputs
+                capabilities.inputIcons = inputIcons
+                capabilityCallback?(capabilities)
                 inputListCallback?(inputIcons)
             }
         }
-        
-        // Check for sound output data in response (from getSoundOutput or subscribeSoundOutput)
-        // WebOS API may use "soundOutput" or "output" as the key
+
         if let soundOutputStr = extractSoundOutput(from: payload) {
-            let soundOutput = TVSoundOutput.fromAPIValue(soundOutputStr)
-            soundOutputChangeCallback?(soundOutput)
-            logger.debug("Sound output: \(soundOutputStr) -> \(soundOutput.displayName)")
-        }
-    }
-    
-    /// Handle push message
-    private func handlePushMessage(_ messageDict: [String: Any]) async {
-        guard let payload = messageDict["payload"] as? [String: Any] else { return }
-
-        // Debug: log push payload for diagnosis
-        logger.debug("Push payload keys: \(payload.keys.sorted())")
-
-        if let callback = diagnosticPayloadCallback {
-            callback("push", diagnosticPayloadJSON(from: payload))
-        }
-        
-        if let appId = extractAppId(from: payload) {
-            if let inputType = mapAppIdToInputType(appId) {
-                inputChangeCallback?(inputType)
-                logger.debug("Foreground app input: \(appId) -> \(inputType.displayName)")
-            }
+            soundOutputChangeCallback?(TVSoundOutput.fromAPIValue(soundOutputStr))
         }
 
-        if let inputSource = extractInputSource(from: payload) {
-            let inputType = mapInputSourceToType(inputSource)
-            inputChangeCallback?(inputType)
-            logger.debug("Input change: \(inputSource) -> \(inputType.displayName)")
-        }
-
-        // Volume subscription push
-        if let volume = payload["volume"] as? Int {
-            let isMuted = payload["muted"] as? Bool ?? false
-            volumeChangeCallback?(volume, isMuted)
-            logger.debug("Volume push: \(volume), muted: \(isMuted)")
-        } else if let volumeStatus = payload["volumeStatus"] as? [String: Any],
-                  let volume = volumeStatus["volume"] as? Int {
-            let isMuted = volumeStatus["muteStatus"] as? Bool ?? volumeStatus["muted"] as? Bool ?? false
-            volumeChangeCallback?(volume, isMuted)
-            logger.debug("Volume push from volumeStatus: \(volume), muted: \(isMuted)")
-        }
-        
-        // Check for sound output in any push message (may come from sound output subscription)
-        if let soundOutputStr = extractSoundOutput(from: payload) {
-            let soundOutput = TVSoundOutput.fromAPIValue(soundOutputStr)
-            soundOutputChangeCallback?(soundOutput)
-            logger.debug("Sound output push: \(soundOutput.displayName)")
-        }
-    }
-    
-    /// Handle foreground app update
-    private func handleForegroundAppUpdate(_ payload: [String: Any]) async {
-        // Update capabilities based on current app
-        let capabilities = TVCapabilities()
-        capabilities.usesSSL = self.usesSSL
-        
-        logger.debug("TV capabilities - SSL: \(self.usesSSL)")
-        
-        capabilityCallback?(capabilities)
-        
-        // Extract current input from foreground app info
-        if let appId = extractAppId(from: payload) {
-            if let inputType = mapAppIdToInputType(appId) {
-                inputChangeCallback?(inputType)
-                logger.debug("Foreground app input: \(appId) -> \(inputType.displayName)")
-            }
-        }
-    }
-    
-    /// Handle input change
-    private func handleInputChange(_ payload: [String: Any]) async {
-        // Extract input type from payload
-        if let inputSource = extractInputSource(from: payload) {
-            let inputType = mapInputSourceToType(inputSource)
-            inputChangeCallback?(inputType)
+        // ssap://system/getSystemInfo
+        if let displayModel = payload["modelName"] as? String {
+            capabilities.displayModel = displayModel
+            capabilityCallback?(capabilities)
         }
     }
 
@@ -854,224 +937,80 @@ final class WebOSClient: WebOSClientProtocol {
         return nil
     }
 
-    private func diagnosticPayloadJSON(from payload: [String: Any]) -> String {
-        guard JSONSerialization.isValidJSONObject(payload) else {
-            return String(describing: payload)
-        }
-
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-            return String(data: data, encoding: .utf8) ?? String(describing: payload)
-        } catch {
-            return String(describing: payload)
-        }
-    }
-
-    private func sendPowerStatusRequest(timeout: TimeInterval = 5) async throws -> TVPowerStatus {
-        guard _connectionState == .connected, handshakeCompleted else {
-            throw LGTVError.webosError("Not connected to TV")
-        }
-
-        if let testSendCommandHandler {
-            do {
-                try await testSendCommandHandler(.getPowerState)
-                return TVPowerStatus()
-            } catch {
-                handleConnectionFailure(error)
-                throw error
-            }
-        }
-
-        let messageDict = try createCommandMessage(.getPowerState)
-        guard let requestID = messageDict["id"] as? String else {
-            throw LGTVError.webosError("Request message is missing an id")
-        }
-
-        let data = try JSONSerialization.data(withJSONObject: messageDict)
-        let string = String(data: data, encoding: .utf8)!
-
-        guard let webSocketTask else {
-            let error = LGTVError.webosError("WebSocket connection is unavailable")
-            handleConnectionFailure(error)
-            throw error
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingRequests[requestID] = continuation
-
-            webSocketTask.send(.string(string)) { [weak self] error in
-                guard let error else { return }
-
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if let pendingRequest = self.pendingRequests.removeValue(forKey: requestID) {
-                        self.logger.error("Failed to send awaited command: \(error.localizedDescription, privacy: .public)")
-                        self.handleConnectionFailure(error)
-                        pendingRequest.resume(throwing: error)
-                    } else {
-                        self.handleConnectionFailure(error)
-                    }
-                }
-            }
-
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(timeout))
-                guard let self else { return }
-                if let pendingRequest = self.pendingRequests.removeValue(forKey: requestID) {
-                    pendingRequest.resume(throwing: LGTVError.webosError("Request timed out: getPowerState"))
-                }
-            }
-        }
-    }
-
-    private func resumePendingRequestIfNeeded(messageDict: [String: Any], payload: [String: Any]) {
-        guard let requestID = messageDict["id"] as? String,
-              let pendingRequest = pendingRequests.removeValue(forKey: requestID) else {
-            return
-        }
-
-        if let returnValue = payload["returnValue"] as? Bool, returnValue == false {
-            let errorText = payload["errorText"] as? String
-            let errorCode = payload["errorCode"] as? String
-            let message: String
-            if let errorText, let errorCode {
-                message = "\(errorText) (\(errorCode))"
-            } else {
-                message = errorText ?? errorCode ?? "WebOS request failed"
-            }
-            pendingRequest.resume(throwing: LGTVError.webosError(message.isEmpty ? "WebOS request failed" : message))
-        } else {
-            pendingRequest.resume(returning: TVPowerStatus(payload: payload))
-        }
-    }
-
-    private func failHandshake(_ error: Error, attemptID: UInt64? = nil) {
-        guard isCurrentConnectionAttempt(attemptID) else { return }
-        guard let handshakeContinuation else { return }
-        self.handshakeContinuation = nil
-        handshakeContinuation.resume(throwing: error)
-    }
-    
-    /// Map input source string to TVInputType
-    private func mapInputSourceToType(_ inputSource: String) -> TVInputType {
+    /// Returns nil for sources this app does not model, rather than guessing an input.
+    private func mapInputSourceToType(_ inputSource: String) -> TVInputType? {
         switch inputSource.lowercased() {
-        case "hdmi_1", "hdmi1":
-            return .hdmi1
-        case "hdmi_2", "hdmi2":
-            return .hdmi2
-        case "hdmi_3", "hdmi3":
-            return .hdmi3
-        case "hdmi_4", "hdmi4":
-            return .hdmi4
-        case "dp_1", "displayport1":
-            return .displayPort1
-        case "dp_2", "displayport2":
-            return .displayPort2
-        case "usb_c_1", "usbc1":
-            return .usbC1
-        case "usb_c_2", "usbc2":
-            return .usbC2
-        default:
-            return .hdmi1 // fallback
+        case "hdmi_1", "hdmi1": return .hdmi1
+        case "hdmi_2", "hdmi2": return .hdmi2
+        case "hdmi_3", "hdmi3": return .hdmi3
+        case "hdmi_4", "hdmi4": return .hdmi4
+        case "dp_1", "displayport1": return .displayPort1
+        case "dp_2", "displayport2": return .displayPort2
+        case "usb_c_1", "usbc_1", "usbc1": return .usbC1
+        case "usb_c_2", "usbc_2", "usbc2": return .usbC2
+        default: return nil
         }
     }
-    
-    /// Map WebOS app ID to TVInputType
-    /// Returns nil if the app ID doesn't correspond to an input
-    private func mapAppIdToInputType(_ appId: String) -> TVInputType? {
-        // WebOS input app IDs follow pattern: com.webos.app.hdmi1, com.webos.app.hdmi2, etc.
-        let lowercased = appId.lowercased()
-        
-        for inputType in TVInputType.allCases {
-            if lowercased == inputType.appId.lowercased() {
-                return inputType
-            }
-        }
-        
-        // Also handle alternative formats
-        if lowercased.contains("hdmi1") || lowercased.contains("hdmi_1") {
-            return .hdmi1
-        } else if lowercased.contains("hdmi2") || lowercased.contains("hdmi_2") {
-            return .hdmi2
-        } else if lowercased.contains("hdmi3") || lowercased.contains("hdmi_3") {
-            return .hdmi3
-        } else if lowercased.contains("hdmi4") || lowercased.contains("hdmi_4") {
-            return .hdmi4
-        } else if lowercased.contains("dp1") || lowercased.contains("dp_1") || lowercased.contains("displayport1") {
-            return .displayPort1
-        } else if lowercased.contains("dp2") || lowercased.contains("dp_2") || lowercased.contains("displayport2") {
-            return .displayPort2
-        } else if lowercased.contains("usbc1") || lowercased.contains("usbc_1") || lowercased.contains("usb-c1") {
-            return .usbC1
-        } else if lowercased.contains("usbc2") || lowercased.contains("usbc_2") || lowercased.contains("usb-c2") {
-            return .usbC2
-        }
-        
-        return nil
+
+    // MARK: - Command Encoding
+
+    struct CommandDescriptor {
+        let type: String
+        let uri: String
+        let payload: [String: Any]?
     }
-    
-    /// Create command message
-    private func createCommandMessage(_ command: WebOSCommand) throws -> [String: Any] {
-        let id = "req_\(messageCounter)"
-        messageCounter += 1
-        
-        var message: [String: Any] = [
-            "id": id,
-            "type": "request"
-        ]
-        
+
+    static func descriptor(for command: WebOSCommand) -> CommandDescriptor {
+        func request(_ uri: String, _ payload: [String: Any]? = nil) -> CommandDescriptor {
+            CommandDescriptor(type: "request", uri: uri, payload: payload)
+        }
+        func subscribe(_ uri: String) -> CommandDescriptor {
+            CommandDescriptor(type: "subscribe", uri: uri, payload: nil)
+        }
+
         switch command {
         case .getForegroundAppInfo:
-            message["type"] = "subscribe"
-            message["uri"] = "ssap://com.webos.applicationManager/getForegroundAppInfo"
+            return subscribe("ssap://com.webos.applicationManager/getForegroundAppInfo")
         case .getCurrentForegroundAppInfo:
-            message["uri"] = "ssap://com.webos.applicationManager/getForegroundAppInfo"
+            return request("ssap://com.webos.applicationManager/getForegroundAppInfo")
         case .getInputList:
-            message["uri"] = "ssap://tv/getInputList"
+            return request("ssap://tv/getExternalInputList")
         case .powerOn:
-            message["uri"] = "ssap://system/turnOn"
+            return request("ssap://system/turnOn")
         case .powerOff:
-            message["uri"] = "ssap://system/turnOff"
+            return request("ssap://system/turnOff")
         case .volumeUp:
-            message["uri"] = "ssap://audio/volumeUp"
+            return request("ssap://audio/volumeUp")
         case .volumeDown:
-            message["uri"] = "ssap://audio/volumeDown"
+            return request("ssap://audio/volumeDown")
         case .setVolume(let level):
-            message["uri"] = "ssap://audio/setVolume"
-            message["payload"] = ["volume": level]
+            return request("ssap://audio/setVolume", ["volume": level])
         case .getVolume:
-            message["uri"] = "ssap://audio/getVolume"
+            return request("ssap://audio/getVolume")
         case .subscribeVolume:
-            message["type"] = "subscribe"
-            message["uri"] = "ssap://audio/getVolume"
+            return subscribe("ssap://audio/getVolume")
         case .getPowerState:
-            message["uri"] = "ssap://com.webos.service.tvpower/power/getPowerState"
+            return request("ssap://com.webos.service.tvpower/power/getPowerState")
         case .mute:
-            message["uri"] = "ssap://audio/mute"
+            return request("ssap://audio/setMute", ["mute": true])
         case .unmute:
-            message["uri"] = "ssap://audio/unmute"
+            return request("ssap://audio/setMute", ["mute": false])
         case .setInput(let inputId):
-            message["uri"] = "ssap://tv/switchInput"
-            message["payload"] = ["inputId": inputId]
+            return request("ssap://tv/switchInput", ["inputId": inputId])
         case .screenOn:
-            message["uri"] = "ssap://com.webos.service.tvpower/power/turnOnScreen"
-            message["payload"] = ["standbyMode": "active"]
+            return request("ssap://com.webos.service.tvpower/power/turnOnScreen", ["standbyMode": "active"])
         case .screenOff:
-            message["uri"] = "ssap://com.webos.service.tvpower/power/turnOffScreen"
-            message["payload"] = ["standbyMode": "active"]
+            return request("ssap://com.webos.service.tvpower/power/turnOffScreen", ["standbyMode": "active"])
         case .setDeviceInfo(let inputId, let icon, let label):
-            message["uri"] = "ssap://com.webos.service.eim/setDeviceInfo"
-            message["payload"] = ["id": inputId, "icon": "\(icon).png", "label": label]
+            return request("ssap://com.webos.service.eim/setDeviceInfo", ["id": inputId, "icon": "\(icon).png", "label": label])
         case .getSoundOutput:
-            message["uri"] = "ssap://com.webos.service.apiadapter/audio/getSoundOutput"
+            return request("ssap://com.webos.service.apiadapter/audio/getSoundOutput")
         case .subscribeSoundOutput:
-            message["type"] = "subscribe"
-            message["uri"] = "ssap://com.webos.service.apiadapter/audio/getSoundOutput"
+            return subscribe("ssap://com.webos.service.apiadapter/audio/getSoundOutput")
         case .setSoundOutput(let output):
-            message["uri"] = "ssap://com.webos.service.apiadapter/audio/changeSoundOutput"
-            message["payload"] = ["output": output]
+            return request("ssap://com.webos.service.apiadapter/audio/changeSoundOutput", ["output": output])
+        case .getSystemInfo:
+            return request("ssap://system/getSystemInfo")
         }
-        
-        return message
     }
 }

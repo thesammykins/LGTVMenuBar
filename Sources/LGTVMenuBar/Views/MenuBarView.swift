@@ -1,646 +1,414 @@
 import SwiftUI
 
-/// Main menu bar popover view displaying TV status and controls
+/// The popover shown from the menu bar: status, the controls used every day, and a way into
+/// Settings.
+///
+/// Liquid Glass: the popover itself is the glass surface, supplied by the system on macOS 26
+/// and later. Everything inside is content on that surface, so it uses standard controls with
+/// no backgrounds or materials of its own. Glass-styled buttons here would stack glass on glass,
+/// which the HIG rules out.
 struct MenuBarView: View {
-    @Bindable var controller: TVController
-    let softwareUpdates: SoftwareUpdateController?
-    let onOpenSettings: (() -> Void)?
-    @State private var showingSettings = false
-    @State private var actionError: ActionError?
+    let controller: TVController
+    let displayLock: DisplayLockController?
+    let onOpenSettings: (SettingsWindowController.Pane?) -> Void
+
+    @State private var actionProblem: String?
     @State private var audioOutputType: AudioOutputType = .unknown
-    @State private var audioOutputName: String = ""
-    @State private var audioService: AudioOutputService?
-    
+    @State private var audioService = AudioOutputService()
+
     init(
         controller: TVController,
-        softwareUpdates: SoftwareUpdateController? = nil,
-        onOpenSettings: (() -> Void)? = nil
+        displayLock: DisplayLockController? = nil,
+        onOpenSettings: @escaping (SettingsWindowController.Pane?) -> Void = { _ in }
     ) {
         self.controller = controller
-        self.softwareUpdates = softwareUpdates
+        self.displayLock = displayLock
         self.onOpenSettings = onOpenSettings
     }
-    
-    public var body: some View {
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Status section
-            StatusSection(controller: controller)
-            
+            ConnectionStatusView(presentation: controller.connectionPresentation)
+
+            notices
+
             Divider()
-            
-            // Show controls if connected to TV, or if Arylic volume is targeted
-            #if LOCAL_ARYLIC_BUILD
-            let arylicOnly = !controller.connectionState.isConnected &&
-                controller.isArylicVolumeControlEnabled && controller.volumeControlTarget == .arylic
-            #else
-            let arylicOnly = false
-            #endif
-            if controller.connectionState.isConnected {
-                QuickActionsSection(controller: controller, audioOutputType: audioOutputType, onError: reportActionError)
+
+            if controller.configuration == nil {
+                Button("Set Up TV…") { onOpenSettings(.tv) }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Divider()
-                VolumeSection(controller: controller, onError: reportActionError)
+            } else if controller.connectionState.isConnected {
+                ConnectedControls(controller: controller, showsSoundOutput: showsSoundOutput, perform: perform)
                 Divider()
-            } else if arylicOnly {
-                VolumeSection(controller: controller, onError: reportActionError)
+                VolumeControls(controller: controller, perform: perform)
                 Divider()
-            } else if controller.configuration != nil {
-                ConnectionSection(controller: controller, onError: reportActionError)
+            } else {
+                if arylicOnly {
+                    VolumeControls(controller: controller, perform: perform)
+                    Divider()
+                }
+                DisconnectedControls(controller: controller, report: { actionProblem = $0 })
                 Divider()
             }
-            
-            // Footer with gear toggle
-            FooterSection(showingSettings: $showingSettings, onOpenSettings: onOpenSettings)
-            
-            // Inline settings (when expanded)
-            if showingSettings && onOpenSettings == nil {
-                Divider()
-                InlineSettingsView(controller: controller, softwareUpdates: softwareUpdates)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+
+            HStack {
+                Button {
+                    onOpenSettings(nil)
+                } label: {
+                    Label("Settings…", systemImage: "gearshape")
+                }
+                Spacer()
+                Button("Quit") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .keyboardShortcut("q")
             }
+            .buttonStyle(.borderless)
         }
         .padding()
-        .frame(width: showingSettings && onOpenSettings == nil ? 420 : 280)
-        .fixedSize(horizontal: false, vertical: showingSettings && onOpenSettings == nil)
-        .animation(.easeInOut(duration: 0.2), value: showingSettings)
-        .conditionalGlassBackground()
-        .alert(item: $actionError) { actionError in
-            Alert(
-                title: Text(actionError.title),
-                message: Text(actionError.message),
-                dismissButton: .default(Text("OK"))
-            )
-        }
+        .frame(width: 300)
         .task {
-            // Initialize audio service lazily
-            let service = AudioOutputService()
-            audioService = service
-            
-            // Initialize audio output type
-            audioOutputType = service.currentOutputType
-            audioOutputName = service.currentOutputName
-            
-            // Start monitoring for changes
-            service.startMonitoring { newType in
+            audioOutputType = audioService.currentOutputType
+            audioService.startMonitoring { newType in
                 Task { @MainActor in
                     audioOutputType = newType
-                    audioOutputName = service.currentOutputName
                 }
             }
         }
     }
 
-    private func reportActionError(_ error: Error) {
-        actionError = ActionError(error: error)
-    }
-}
-
-private struct ActionError: Identifiable {
-    let id = UUID()
-    let title: String
-    let message: String
-
-    init(error: Error) {
-        self.title = "Action Failed"
-        self.message = error.localizedDescription
-    }
-}
-
-// MARK: - Status Section
-
-private struct StatusSection: View {
-    @Bindable var controller: TVController
-    
-    var body: some View {
-        HStack {
-            // Status indicator
-            Circle()
-                .fill(statusColor)
-                .frame(width: 10, height: 10)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(controller.configuration?.name ?? "No TV Configured")
-                    .font(.headline)
-                
-                Text(statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    @ViewBuilder
+    private var notices: some View {
+        if let actionProblem {
+            HStack(alignment: .top) {
+                InlineNotice(kind: .failure, text: actionProblem)
+                Spacer(minLength: 4)
+                Button {
+                    self.actionProblem = nil
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Dismiss")
             }
-            
-            Spacer()
+        }
+
+        if controller.pixelRefreshStartedAt != nil {
+            InlineNotice(kind: .info, text: "The TV is off so its pixel refresh can run. It comes back by itself when you return, or in a few minutes.")
+        } else if let panelCare = controller.panelCare, panelCare.isRefreshDue, panelCare.shortRefreshOverdueHours >= 24 {
+            InlineNotice(kind: .warning, text: "A pixel refresh is \(panelCare.shortRefreshOverdueHours) hours overdue.")
+            Button("Review in Settings…") { onOpenSettings(.panelCare) }
+                .buttonStyle(.link)
+        }
+
+        if !controller.suspendedAutomation.isEmpty {
+            InlineNotice(kind: .warning, text: "Some automation is paused to stop a loop.")
+            Button("Review in Settings…") { onOpenSettings(.automation) }
+                .buttonStyle(.link)
+        }
+
+        if case .paused = displayLock?.status {
+            InlineNotice(kind: .warning, text: "Display Lock is paused.")
+            Button("Review in Settings…") { onOpenSettings(.display) }
+                .buttonStyle(.link)
         }
     }
-    
-    private var statusColor: Color {
-        switch controller.connectionState {
-        case .connected: return .green
-        case .connecting, .registering: return .orange
-        case .disconnected: return .gray
-        case .error: return .red
-        }
+
+    private var showsSoundOutput: Bool {
+        #if LOCAL_ARYLIC_BUILD
+        return audioOutputType == .hdmi || controller.volumeControlTarget == .arylic
+        #else
+        return audioOutputType == .hdmi
+        #endif
     }
-    
-    private var statusText: String {
-        switch controller.connectionState {
-        case .connected:
-            if let input = controller.currentInput {
-                return input.displayName
+
+    private var arylicOnly: Bool {
+        #if LOCAL_ARYLIC_BUILD
+        return controller.isArylicVolumeControlEnabled && controller.volumeControlTarget == .arylic
+        #else
+        return false
+        #endif
+    }
+
+    /// Runs a control's action and shows a failure in the popover instead of an alert.
+    private func perform(_ action: @escaping () async throws -> Void) {
+        actionProblem = nil
+        Task {
+            do {
+                try await action()
+            } catch {
+                actionProblem = error.localizedDescription
             }
-            return "Connected"
-        case .connecting: return "Connecting..."
-        case .registering: return "Pairing..."
-        case .disconnected: return "Disconnected"
-        case .error: return "Connection Error"
         }
     }
 }
 
-// MARK: - Connection Section (when disconnected)
+// MARK: - Disconnected
 
-private struct ConnectionSection: View {
-    @Bindable var controller: TVController
-    let onError: (Error) -> Void
+private struct DisconnectedControls: View {
+    let controller: TVController
+    let report: (String?) -> Void
+
     @State private var isWaking = false
     @State private var isConnecting = false
-    
+
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Button {
+                report(nil)
+                isWaking = true
                 Task {
-                    isWaking = true
                     defer { isWaking = false }
                     await controller.ensureTVAwake(reason: "manualWake", requiresWakePreference: false)
+                    if !controller.connectionState.isConnected && !controller.connectionState.isTransitioning {
+                        report("The TV did not answer after waking it. Check that it has power and that “Turn on via Wi-Fi” is on.")
+                    }
                 }
             } label: {
-                Label("Wake TV", systemImage: "power")
+                Label("Turn On", systemImage: "power")
+                    .frame(maxWidth: .infinity)
             }
-            .disabled(isWaking)
-            
+            // The one tinted control in this state. On the system's glass popover, emphasis
+            // comes from a single coloured background, not from colouring several controls.
+            .buttonStyle(.borderedProminent)
+            .disabled(isWaking || isConnecting)
+
             Button {
+                report(nil)
+                isConnecting = true
                 Task {
-                    isConnecting = true
                     defer { isConnecting = false }
                     do {
                         try await controller.connect()
                     } catch {
-                        onError(error)
+                        report(error.localizedDescription)
                     }
                 }
             } label: {
-                Label("Connect", systemImage: "wifi")
+                Label("Connect", systemImage: "link")
+                    .frame(maxWidth: .infinity)
             }
-            .disabled(isConnecting)
+            .disabled(isWaking || isConnecting || controller.connectionState.isTransitioning)
         }
         .buttonStyle(.bordered)
+        .controlSize(.large)
+
+        if isWaking {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Turning the TV on…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
-// MARK: - Quick Actions Section
+// MARK: - Connected
 
-private struct QuickActionsSection: View {
-    @Bindable var controller: TVController
-    let audioOutputType: AudioOutputType
-    let onError: (Error) -> Void
-    
+private struct ConnectedControls: View {
+    let controller: TVController
+    let showsSoundOutput: Bool
+    let perform: (@escaping () async throws -> Void) -> Void
+
+    private enum SoundChoice: Hashable {
+        case tv(TVSoundOutput)
+        case arylic
+    }
+
     var body: some View {
-        VStack(spacing: 8) {
-            // Row 1: Power controls
-            HStack(spacing: 12) {
-                // Power off button
-                Button {
-                    performAction {
-                        try await controller.powerOff()
-                    }
-                } label: {
-                    Label {
-                        Text("Power Off")
-                    } icon: {
-                        Image(systemName: "power")
-                            .imageScale(.medium)
-                            .frame(width: 16, height: 16)
-                    }
+        HStack(spacing: 8) {
+            Button {
+                perform { try await controller.powerOff() }
+            } label: {
+                Label("Turn Off", systemImage: "power")
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 2)
-                }
-                .buttonStyle(.bordered)
-                
-                // Screen off button
-                Button {
-                    performAction {
-                        try await controller.screenOff()
-                    }
-                } label: {
-                    Label {
-                        Text("Screen Off")
-                    } icon: {
-                        Image(systemName: "moon.fill")
-                            .imageScale(.medium)
-                            .frame(width: 16, height: 16)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 2)
-                }
-                .buttonStyle(.bordered)
             }
-            
-            // Row 2: Input picker and Sound Output picker (side by side)
-            HStack(spacing: 8) {
-                // Input picker
-                Menu {
-                    ForEach(TVInputType.allCases, id: \.self) { input in
-                        Button(input.displayName) {
-                            performAction {
-                                try await controller.switchInput(input)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Image(systemName: "tv")
-                        Text(controller.currentInput?.displayName ?? "Select Input")
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+            Button {
+                perform { try await controller.screenOff() }
+            } label: {
+                Label("Screen Off", systemImage: "moon.fill")
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(.quaternary)
-                    .cornerRadius(6)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+
+        Picker("Input", selection: inputBinding) {
+            if controller.currentInput == nil {
+                Text("TV app").tag(TVInputType?.none)
+                Divider()
+            }
+            ForEach(controller.inputChoices, id: \.input) { choice in
+                Text(choice.title).tag(TVInputType?.some(choice.input))
+            }
+        }
+
+        if showsSoundOutput {
+            Picker("Sound", selection: soundBinding) {
+                ForEach(soundOutputs, id: \.self) { output in
+                    Text(output.displayName).tag(SoundChoice.tv(output))
                 }
-                .menuStyle(.borderlessButton)
-                
-                // Sound output picker (only show when Mac audio goes to TV)
                 #if LOCAL_ARYLIC_BUILD
-                if audioOutputType == .hdmi || controller.volumeControlTarget == .arylic {
-                    Menu {
-                        Button("TV Speaker") {
-                            performAction {
-                                try await controller.setSoundOutput(.tvSpeaker)
-                                #if LOCAL_ARYLIC_BUILD
-                                controller.volumeControlTarget = .tv
-                                #endif
-                            }
-                        }
-                        Button("HDMI ARC") {
-                            performAction {
-                                try await controller.setSoundOutput(.externalArc)
-                                #if LOCAL_ARYLIC_BUILD
-                                controller.volumeControlTarget = .tv
-                                #endif
-                            }
-                        }
-                        Button("Optical") {
-                            performAction {
-                                try await controller.setSoundOutput(.externalOptical)
-                                #if LOCAL_ARYLIC_BUILD
-                                controller.volumeControlTarget = .tv
-                                #endif
-                            }
-                        }
-                        Button("Headphone") {
-                            performAction {
-                                try await controller.setSoundOutput(.headphone)
-                                #if LOCAL_ARYLIC_BUILD
-                                controller.volumeControlTarget = .tv
-                                #endif
-                            }
-                        }
-                        #if LOCAL_ARYLIC_BUILD
-                        if controller.isArylicVolumeControlEnabled {
-                            Divider()
-                            Button {
-                                controller.volumeControlTarget = .arylic
-                            } label: {
-                                HStack {
-                                    Text("Arylic")
-                                    if controller.volumeControlTarget == .arylic {
-                                        Spacer()
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                        #endif
-                    } label: {
-                        HStack {
-                            Image(systemName: "speaker.wave.2")
-                            #if LOCAL_ARYLIC_BUILD
-                            Text(controller.volumeControlTarget == .arylic ? "Arylic" : controller.soundOutput.displayName)
-                            #else
-                            Text(controller.soundOutput.displayName)
-                            #endif
-                            Spacer()
-                            Image(systemName: "chevron.down")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(.quaternary)
-                        .cornerRadius(6)
-                    }
-                    .menuStyle(.borderlessButton)
-                }
-                #else
-                if audioOutputType == .hdmi {
-                    Menu {
-                        Button("TV Speaker") {
-                            performAction {
-                                try await controller.setSoundOutput(.tvSpeaker)
-                            }
-                        }
-                        Button("HDMI ARC") {
-                            performAction {
-                                try await controller.setSoundOutput(.externalArc)
-                            }
-                        }
-                        Button("Optical") {
-                            performAction {
-                                try await controller.setSoundOutput(.externalOptical)
-                            }
-                        }
-                        Button("Headphone") {
-                            performAction {
-                                try await controller.setSoundOutput(.headphone)
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Image(systemName: "speaker.wave.2")
-                            Text(controller.soundOutput.displayName)
-                            Spacer()
-                            Image(systemName: "chevron.down")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(.quaternary)
-                        .cornerRadius(6)
-                    }
-                    .menuStyle(.borderlessButton)
+                if controller.isArylicVolumeControlEnabled {
+                    Divider()
+                    Text("Arylic").tag(SoundChoice.arylic)
                 }
                 #endif
             }
         }
     }
 
-    private func performAction(_ action: @escaping () async throws -> Void) {
-        Task {
-            do {
-                try await action()
-            } catch {
-                onError(error)
+    private var inputBinding: Binding<TVInputType?> {
+        Binding(
+            get: { controller.currentInput },
+            set: { newValue in
+                guard let newValue, newValue != controller.currentInput else { return }
+                perform { try await controller.switchInput(newValue) }
             }
+        )
+    }
+
+    /// The usual outputs, plus whatever the TV reports if it is something else.
+    private var soundOutputs: [TVSoundOutput] {
+        var outputs: [TVSoundOutput] = [.tvSpeaker, .externalArc, .externalOptical, .headphone]
+        if !outputs.contains(controller.soundOutput) {
+            outputs.append(controller.soundOutput)
         }
+        return outputs
+    }
+
+    private var soundBinding: Binding<SoundChoice> {
+        Binding(
+            get: {
+                #if LOCAL_ARYLIC_BUILD
+                if controller.volumeControlTarget == .arylic { return .arylic }
+                #endif
+                return .tv(controller.soundOutput)
+            },
+            set: { choice in
+                switch choice {
+                case .arylic:
+                    #if LOCAL_ARYLIC_BUILD
+                    controller.volumeControlTarget = .arylic
+                    #endif
+                case .tv(let output):
+                    perform {
+                        try await controller.setSoundOutput(output)
+                        #if LOCAL_ARYLIC_BUILD
+                        controller.volumeControlTarget = .tv
+                        #endif
+                    }
+                }
+            }
+        )
     }
 }
 
-// MARK: - Volume Section
+// MARK: - Volume
 
-private struct VolumeSection: View {
-    @Bindable var controller: TVController
-    let onError: (Error) -> Void
-    @State private var sliderPosition: Double = 0.5  // 0-1 range, maps to volume via curve
-    
-    /// Convert slider position (0-1) to volume (0-100) with power curve
-    /// Exponent 2.0 = strong resistance at high volumes
-    private func sliderToVolume(_ position: Double) -> Int {
-        Int((pow(position, 2.0) * 100).rounded())
-    }
-    
-    /// Convert volume (0-100) to slider position (0-1) - inverse of above
-    private func volumeToSlider(_ volume: Int) -> Double {
-        pow(Double(volume) / 100.0, 1.0 / 2.0) // sqrt
-    }
-    
+private struct VolumeControls: View {
+    let controller: TVController
+    let perform: (@escaping () async throws -> Void) -> Void
+
+    @State private var sliderPosition = 0.5
+    @State private var isDragging = false
+
     var body: some View {
-        VStack(spacing: 8) {
-            // Show different UI based on TV sound output type
-            if controller.soundOutput.supportsVolumeSlider {
-                // Built-in speakers: show slider with volume level
-                sliderVolumeControl
+        Group {
+            if controller.soundOutput.supportsVolumeSlider || arylicTargeted {
+                sliderControl
             } else {
-                // HDMI/eARC: show simple +/- buttons only
-                simpleVolumeControl
+                stepControl
             }
         }
+        .onAppear { sliderPosition = VolumeCurve.volumeToSlider(controller.volume) }
         .onChange(of: controller.volume) { _, newValue in
-            sliderPosition = volumeToSlider(newValue)
-        }
-        .onAppear {
-            sliderPosition = volumeToSlider(controller.volume)
-        }
-        .onChange(of: controller.soundOutput) { _, _ in
-            sliderPosition = volumeToSlider(controller.volume)
+            if !isDragging { sliderPosition = VolumeCurve.volumeToSlider(newValue) }
         }
     }
-    
-    /// Slider-based volume control for built-in speakers
-    private var sliderVolumeControl: some View {
-        VStack(spacing: 8) {
-            HStack {
-                // Mute button
-                muteButton
-                
-                // Volume slider
-                Slider(value: $sliderPosition, in: 0...1) {
-                    Text("Volume")
-                } onEditingChanged: { editing in
-                    if !editing {
-                        performAction {
-                            try await controller.setVolume(sliderToVolume(sliderPosition))
-                        }
-                    }
+
+    private var arylicTargeted: Bool {
+        #if LOCAL_ARYLIC_BUILD
+        return controller.isArylicVolumeControlEnabled && controller.volumeControlTarget == .arylic
+        #else
+        return false
+        #endif
+    }
+
+    private var sliderControl: some View {
+        HStack(spacing: 8) {
+            muteButton
+            Slider(value: $sliderPosition, in: 0...1) {
+                Text("Volume")
+            } onEditingChanged: { editing in
+                isDragging = editing
+                if !editing {
+                    let volume = VolumeCurve.sliderToVolume(sliderPosition)
+                    perform { try await controller.setVolume(volume) }
                 }
-                
-                // Volume value
-                Text("\(sliderToVolume(sliderPosition))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30)
             }
-            
-            // Volume up/down buttons for fine control
-            HStack {
-                volumeDownButton
-                Spacer()
-                volumeUpButton
+            .labelsHidden()
+            .accessibilityLabel("Volume")
+            .accessibilityValue("\(VolumeCurve.sliderToVolume(sliderPosition)) percent")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: perform { try await controller.volumeUp() }
+                case .decrement: perform { try await controller.volumeDown() }
+                @unknown default: break
+                }
             }
+
+            Text("\(VolumeCurve.sliderToVolume(sliderPosition))")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 28, alignment: .trailing)
+                .accessibilityHidden(true)
         }
     }
-    
-    /// Simple +/- button volume control for HDMI/eARC output
-    private var simpleVolumeControl: some View {
-        HStack(spacing: 16) {
-            // Volume down
+
+    /// For ARC and optical the TV does not report a level, so only steps are offered.
+    private var stepControl: some View {
+        HStack(spacing: 8) {
             Button {
-                performAction {
-                    try await controller.volumeDown()
-                }
+                perform { try await controller.volumeDown() }
             } label: {
-                Image(systemName: "speaker.minus.fill")
-                    .imageScale(.large)
-                    .frame(width: 20, height: 20)
-                    .padding(.vertical, 4)
+                Image(systemName: "speaker.minus.fill").frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
-            .help("Volume Down")
-            .accessibilityLabel("Volume Down")
-            
-            // Mute button (larger, centered)
+            .help("Volume down")
+            .accessibilityLabel("Volume down")
+
             Button {
-                performAction {
-                    try await controller.toggleMute()
-                }
+                perform { try await controller.toggleMute() }
             } label: {
-                Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .imageScale(.large)
-                    .frame(width: 20, height: 20)
-                    .foregroundStyle(controller.isMuted ? .red : .primary)
-                    .padding(.vertical, 4)
+                Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill").frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
             .help(controller.isMuted ? "Unmute" : "Mute")
             .accessibilityLabel(controller.isMuted ? "Unmute" : "Mute")
-            
-            // Volume up
+
             Button {
-                performAction {
-                    try await controller.volumeUp()
-                }
+                perform { try await controller.volumeUp() }
             } label: {
-                Image(systemName: "speaker.plus.fill")
-                    .imageScale(.large)
-                    .frame(width: 20, height: 20)
-                    .padding(.vertical, 4)
+                Image(systemName: "speaker.plus.fill").frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
-            .help("Volume Up")
-            .accessibilityLabel("Volume Up")
+            .help("Volume up")
+            .accessibilityLabel("Volume up")
         }
-        .frame(maxWidth: .infinity)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
     }
-    
+
     private var muteButton: some View {
         Button {
-            performAction {
-                try await controller.toggleMute()
-            }
+            perform { try await controller.toggleMute() }
         } label: {
             Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                .foregroundStyle(controller.isMuted ? .red : .primary)
+                .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
         .help(controller.isMuted ? "Unmute" : "Mute")
         .accessibilityLabel(controller.isMuted ? "Unmute" : "Mute")
-    }
-    
-    private var volumeDownButton: some View {
-        Button {
-            Task {
-                do {
-                    try await controller.volumeDown()
-                    // Update slider position based on new volume (linear 1% decrement)
-                    let currentVolume = sliderToVolume(sliderPosition)
-                    let newVolume = max(0, currentVolume - 1)
-                    sliderPosition = volumeToSlider(newVolume)
-                } catch {
-                    onError(error)
-                }
-            }
-        } label: {
-            Image(systemName: "minus")
-        }
-        .buttonStyle(.borderless)
-        .help("Volume Down")
-        .accessibilityLabel("Volume Down")
-    }
-    
-    private var volumeUpButton: some View {
-        Button {
-            Task {
-                do {
-                    try await controller.volumeUp()
-                    // Update slider position based on new volume (linear 1% increment)
-                    let currentVolume = sliderToVolume(sliderPosition)
-                    let newVolume = min(100, currentVolume + 1)
-                    sliderPosition = volumeToSlider(newVolume)
-                } catch {
-                    onError(error)
-                }
-            }
-        } label: {
-            Image(systemName: "plus")
-        }
-        .buttonStyle(.borderless)
-        .help("Volume Up")
-        .accessibilityLabel("Volume Up")
-    }
-
-    private func performAction(_ action: @escaping () async throws -> Void) {
-        Task {
-            do {
-                try await action()
-            } catch {
-                onError(error)
-            }
-        }
-    }
-}
-
-// MARK: - Footer Section
-
-private struct FooterSection: View {
-    @Binding var showingSettings: Bool
-    let onOpenSettings: (() -> Void)?
-    
-    var body: some View {
-        HStack {
-            Button {
-                if let onOpenSettings {
-                    onOpenSettings()
-                } else {
-                    showingSettings.toggle()
-                }
-            } label: {
-                Image(systemName: showingSettings && onOpenSettings == nil ? "gearshape.fill" : "gearshape")
-                    .foregroundStyle(showingSettings && onOpenSettings == nil ? .primary : .secondary)
-            }
-            .buttonStyle(.borderless)
-            .help(showingSettings && onOpenSettings == nil ? "Hide Settings" : "Show Settings")
-            .accessibilityLabel(showingSettings && onOpenSettings == nil ? "Hide Settings" : "Show Settings")
-            
-            Spacer()
-            
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
-            .buttonStyle(.borderless)
-            .keyboardShortcut("q")
-            .help("Quit LGTV Menu Bar")
-        }
-        .font(.caption)
-    }
-}
-
-// MARK: - Liquid Glass Modifier
-
-extension View {
-    /// Applies Liquid Glass background effect on macOS 26+ (Tahoe)
-    /// On older versions, returns the view unchanged
-    @ViewBuilder
-    func conditionalGlassBackground() -> some View {
-        if #available(macOS 26, *) {
-            // TODO: Replace with actual Liquid Glass API when macOS 26 SDK is available
-            // Expected: self.glassBackgroundEffect()
-            self.background(.ultraThinMaterial)
-        } else {
-            // Keep current appearance - no changes for pre-Tahoe
-            self
-        }
     }
 }

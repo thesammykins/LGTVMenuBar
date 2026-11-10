@@ -5,6 +5,11 @@ public struct WebOSConnectionEndpoint: Equatable, Sendable {
     public let scheme: String
     public let port: Int
 
+    public init(scheme: String, port: Int) {
+        self.scheme = scheme
+        self.port = port
+    }
+
     public var usesSSL: Bool {
         scheme == "wss"
     }

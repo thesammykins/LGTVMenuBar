@@ -16,6 +16,10 @@ public enum LGTVError: Error, Equatable, Sendable {
     case launchAtLoginError(String)
     case mediaKeyError(String)
     case powerManagementError(String)
+    /// The TV accepted the request frame but never replied.
+    case requestTimedOut(String)
+    /// An automatic action was refused by the action governor to prevent a loop.
+    case actionSuppressed(String)
     
     // MARK: - Equatable
     
@@ -35,6 +39,8 @@ public enum LGTVError: Error, Equatable, Sendable {
         case (.launchAtLoginError(let a), .launchAtLoginError(let b)): return a == b
         case (.mediaKeyError(let a), .mediaKeyError(let b)): return a == b
         case (.powerManagementError(let a), .powerManagementError(let b)): return a == b
+        case (.requestTimedOut(let a), .requestTimedOut(let b)): return a == b
+        case (.actionSuppressed(let a), .actionSuppressed(let b)): return a == b
         default: return false
         }
     }
@@ -73,6 +79,10 @@ extension LGTVError: LocalizedError {
             return "Media key error: \(message)"
         case .powerManagementError(let message):
             return "Power management error: \(message)"
+        case .requestTimedOut(let request):
+            return "The TV did not answer in time (\(request))"
+        case .actionSuppressed(let message):
+            return message
         }
     }
 }

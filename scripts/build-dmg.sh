@@ -285,7 +285,11 @@ copy_embedded_frameworks() {
 ensure_framework_rpath() {
     local binary_path="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 
-    if otool -l "${binary_path}" | grep -Fq "@executable_path/../Frameworks"; then
+    # Captured first: with pipefail, grep -q closing the pipe early makes otool fail with
+    # SIGPIPE on a large binary, and the rpath would then be added twice.
+    local load_commands
+    load_commands="$(otool -l "${binary_path}")"
+    if grep -Fq "@executable_path/../Frameworks" <<<"${load_commands}"; then
         return
     fi
 
@@ -499,6 +503,10 @@ swift build \
     --arch arm64 \
     --arch x86_64
 
+# Ask SwiftPM where it put the products: the universal output directory differs between
+# toolchains (.build/apple/Products/Release up to Swift 6.3, .build/out/Products/Release after).
+PRODUCTS_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+
 log_success "Build completed"
 
 # =============================================================================
@@ -517,7 +525,7 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources"
 
 # Copy binary
 log_info "Copying binary..."
-cp "${BUILD_DIR}/apple/Products/Release/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/"
+cp "${PRODUCTS_DIR}/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/"
 
 # Copy Info.plist
 log_info "Copying Info.plist..."

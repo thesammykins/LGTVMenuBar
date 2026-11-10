@@ -70,7 +70,22 @@ final class MockKeychainManager: KeychainManagerProtocol, @unchecked Sendable {
     // MARK: - Test Helpers
     
     /// Reset all mock state
+    private var secrets: [String: Data] = [:]
+
+    func saveSecret(_ secret: Data, account: String) throws {
+        secrets[account] = secret
+    }
+
+    func loadSecret(account: String) throws -> Data? {
+        secrets[account]
+    }
+
+    func deleteSecret(account: String) throws {
+        secrets[account] = nil
+    }
+
     func reset() {
+        secrets.removeAll()
         saveClientKeyCalls.removeAll()
         loadClientKeyCalls.removeAll()
         deleteClientKeyCalls.removeAll()

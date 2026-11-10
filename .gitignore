@@ -31,8 +31,6 @@ xcuserdata/
 *.ed25519
 sparkle-private-key*
 
-# Agent-generated documentation (keep local only)
-docs/
 swift-testing-best-practices-2025-12.md
 
 # Agent workspace
@@ -40,3 +38,9 @@ swift-testing-best-practices-2025-12.md
 
 # Diagnostic exports
 lgtv-diagnostics-*.json
+
+# Older local working notes in docs/ (the maintained docs there are tracked)
+docs/phase-*.md
+docs/task-*.md
+docs/macos-*.md
+docs/swiftui-*.md

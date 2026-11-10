@@ -14,7 +14,7 @@ final class StatusItemIconManager {
             return "tv.fill"
         case .disconnected:
             return "tv"
-        case .connecting, .registering:
+        case .connecting, .registering, .awaitingPairing:
             // tv.badge.ellipsis may not exist - check availability
             if NSImage(systemSymbolName: "tv.badge.ellipsis", accessibilityDescription: nil) != nil {
                 return "tv.badge.ellipsis"

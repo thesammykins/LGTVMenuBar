@@ -5,6 +5,8 @@ public enum ConnectionState: Sendable {
     case disconnected
     case connecting
     case registering
+    /// The TV is showing its pairing prompt and waiting for the viewer to accept.
+    case awaitingPairing
     case connected
     case error(Error)
     
@@ -23,7 +25,7 @@ public enum ConnectionState: Sendable {
     /// Whether the client is in a transitional state (connecting or registering)
     public var isTransitioning: Bool {
         switch self {
-        case .connecting, .registering: return true
+        case .connecting, .registering, .awaitingPairing: return true
         default: return false
         }
     }
@@ -43,6 +45,7 @@ extension ConnectionState: Equatable {
         case (.disconnected, .disconnected): return true
         case (.connecting, .connecting): return true
         case (.registering, .registering): return true
+        case (.awaitingPairing, .awaitingPairing): return true
         case (.connected, .connected): return true
         case (.error, .error): return true  // Note: errors compare by case only
         default: return false
@@ -63,6 +66,8 @@ extension ConnectionState: CustomStringConvertible {
             return "Connecting"
         case .registering:
             return "Registering"
+        case .awaitingPairing:
+            return "Awaiting Pairing"
         case .error(let error):
             return "Error: \(error.localizedDescription)"
         }

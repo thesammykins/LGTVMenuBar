@@ -10,27 +10,22 @@ If my LGTV Menubar app is useful to you, you can support its development.
 
 ## Screenshots
 
-| Menu bar (compact) | Menu bar (expanded) |
-| --- | --- |
-| <a href="images/menubar-small.png"><img src="images/menubar-small.png" alt="Menu bar compact" width="320" /></a><br><sub>Compact status view</sub> | <a href="images/menubar-expanded.png"><img src="images/menubar-expanded.png" alt="Menu bar expanded" width="320" /></a><br><sub>Expanded controls</sub> |
-
-| General settings | Automation settings | Diagnostics |
+| Menu | Automation | Display Lock |
 | --- | --- | --- |
-| <a href="images/general.png"><img src="images/general.png" alt="General settings" width="240" /></a><br><sub>Connection and input preferences</sub> | <a href="images/automation.png"><img src="images/automation.png" alt="Automation settings" width="240" /></a><br><sub>Wake/sleep and input rules</sub> | <a href="images/diagnostics.png"><img src="images/diagnostics.png" alt="Diagnostics" width="240" /></a><br><sub>Logging and export tools</sub> |
+| <a href="images/menu.png"><img src="images/menu.png" alt="Menu bar popover" width="260" /></a><br><sub>Power, input, sound and volume</sub> | <a href="images/settings-automation.png"><img src="images/settings-automation.png" alt="Automation settings" width="260" /></a><br><sub>What happens when the Mac sleeps and wakes</sub> | <a href="images/settings-display.png"><img src="images/settings-display.png" alt="Display Lock settings" width="260" /></a><br><sub>Hold resolution, refresh rate, HDR and picture mode</sub> |
 
 ## Features
 
-- **Wake-on-LAN**: Wake your TV when your Mac wakes
-- **Auto Sleep**: Turn off TV when Mac sleeps (skips if watching different input)
-- **Volume Control**: Weighted slider with resistance at high volumes
-- **Input Switching**: Quick switch between HDMI, DisplayPort, USB-C inputs
-- **Screen Control**: Turn screen on/off without powering down TV
-- **PC Mode**: Auto-detect and set PC mode for reduced input lag
-- **Media Keys**: Capture volume keys to control TV volume
-- **Arylic Routing**: Route volume controls to an Arylic device in Arylic-enabled builds
-- **Signed Updates**: Sparkle 2 update checks backed by signed GitHub release appcasts
-- **Newer webOS Support**: Prefer secure `wss://<tv>:3001` and fall back to `ws://<tv>:3000`
-- **Onboarding**: First-run setup wizard
+- **Power with your Mac**: turns the TV on when the Mac wakes and off when it sleeps. A TV showing another input or a streaming app is left alone.
+- **Display Lock**: holds the Mac's resolution, refresh rate and HDR, and optionally the TV's PC input label and picture mode, while the TV shows the Mac's input.
+- **Menu bar controls**: power, screen off, input, sound output and a volume slider weighted towards the quiet end.
+- **Volume keys**: use the keyboard's volume keys for the TV.
+- **Stays connected**: reconnects by itself after the TV or network drops, without waking the TV.
+- **Cannot loop**: automation that repeats too often pauses itself and tells you.
+- **Rooted TVs (optional)**: SSH or Telnet to a TV rooted with Homebrew Channel, with the key kept in the Keychain, for settings the normal connection cannot change.
+- **Newer webOS**: secure `wss://<tv>:3001` first, falling back to `ws://<tv>:3000`.
+- **Signed updates**: Sparkle 2 with signed GitHub release appcasts.
+- **Arylic routing**: send volume to an Arylic device in Arylic-enabled builds.
 
 ## Requirements
 
@@ -74,7 +69,7 @@ Notes:
 - `./scripts/generate-appcast.sh` requires the Sparkle EdDSA private key from `SPARKLE_ED_PRIVATE_KEY`, `SPARKLE_PRIVATE_KEY_FILE`, or the local Keychain account.
 - `./scripts/build-dmg.sh --disable-updater` removes `SUFeedURL`, `SUPublicEDKey`, `SUEnableAutomaticChecks`, and `SUAutomaticallyUpdate` from the staged app bundle.
 - The DMG layout uses `scripts/assets/dmg-background.png` and positions the app next to an Applications symlink for drag-and-drop installation.
-- `./script/build_and_run.sh --screenshot` writes a UX validation screenshot to `screenshots/`.
+- `./script/build_and_run.sh --snapshots` renders the menu and every Settings pane to `screenshots/snapshots/`.
 
 ## Installation
 
@@ -83,7 +78,7 @@ Notes:
 3. Launch LGTVMenuBar
 4. Follow the onboarding wizard to connect your TV
 5. Grant Accessibility permission when prompted (for media key capture)
-6. Use Settings > General > Updates to check for signed GitHub releases
+6. Use Settings › General to check for signed GitHub releases
 
 ## First Launch And Security
 
@@ -98,41 +93,34 @@ For local ad-hoc builds:
 1. Re-grant Accessibility permission after each rebuild.
 2. If Gatekeeper still blocks the app, open the bundle from Finder once with **Open** to confirm the local build.
 
-## Configuration
+## Setup
 
-On first launch, the onboarding wizard will guide you through:
+On first launch the app asks for the TV's name, IP address and MAC address (both are under
+Network in the TV's settings), then connects. The TV shows a prompt; accept it with the remote.
+Give the TV a fixed IP address on your router so it does not change.
 
-1. **TV Discovery**: Enter your TV's IP address and MAC address
-2. **TV Pairing**: Accept the pairing prompt on your TV
-3. **Preferences**: Configure wake/sleep behavior and preferred input
-4. **Permissions**: Grant necessary system permissions
+Everything else is in Settings, opened from the menu or with Command-comma:
 
-## Architecture
+- **TV**: addresses, which input the Mac is plugged into, connection status.
+- **Automation**: power and input behaviour, Wake-on-LAN options.
+- **Display**: Display Lock.
+- **Panel Care**: pixel refresh status and scheduling (rooted TVs).
+- **General**: open at login, volume keys, updates.
+- **Advanced**: rooted TV access and the diagnostic log.
 
-- **Swift 6.0** with strict concurrency
-- **SwiftUI** for the menu bar popover UI
-- **WebSocket** communication with LG webOS API, secure-first on newer TVs
-- **Sparkle 2** for signed app updates
-- **Keychain** for secure pairing key storage
-- **Swift Testing** for unit and integration coverage
+### Rooted TVs
 
-## Project Structure
+Root access is optional and off by default. With a TV rooted through Homebrew Channel and its SSH
+server enabled, turn on **My TV is rooted** in Advanced, enter the TV's shell password once
+(Homebrew Channel's default is `alpine`) and choose **Create Key and Install on TV**. The app
+keeps its private key in the Keychain and remembers the TV's host key. Telnet is offered for TVs
+that only expose that, but it is unencrypted and has no password.
 
-```
-Sources/LGTVMenuBar/
-├── Models/          # Data models and enums
-├── Protocols/       # Protocol definitions
-├── Services/        # Business logic and API clients
-└── Views/           # SwiftUI views
+## Development
 
-Tests/LGTVMenuBarTests/
-├── Mocks/           # Mock implementations for testing
-├── Services/        # Service integration tests
-└── Unit/            # Unit tests
-
-script/              # Local run and UX validation helpers
-scripts/             # DMG packaging, notarization, and appcast scripts
-```
+See [AGENTS.md](AGENTS.md) for commands and rules, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for how the pieces fit, [docs/HARDWARE-VALIDATION.md](docs/HARDWARE-VALIDATION.md) for what still
+needs checking on a real TV, and [docs/RELEASING.md](docs/RELEASING.md) for packaging.
 
 ## License
 

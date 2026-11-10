@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import OSLog
 import Observation
@@ -20,12 +21,21 @@ public final class TVController: TVControllerProtocol {
                 logDiagnostic(level: "info", category: "TVController", message: "Connection state changed", metadata: ["oldState": "\(oldValue)", "newState": "\(connectionState)"])
                 connectionStateDidChange?(connectionState)
                 Task { await updateMediaKeyCapture() }
+                handleConnectionStateChange()
             }
         }
     }
 
     @ObservationIgnored
     var connectionStateDidChange: ((ConnectionState) -> Void)?
+
+    /// Observer for foreground changes (used by Display Lock).
+    @ObservationIgnored
+    var foregroundDidChange: ((TVForeground) -> Void)?
+
+    /// Observer for configuration changes (used by Display Lock).
+    @ObservationIgnored
+    var configurationDidChange: ((TVConfiguration?) -> Void)?
     
     /// TV capabilities (populated after connection)
     public private(set) var capabilities: TVCapabilities?
@@ -36,8 +46,27 @@ public final class TVController: TVControllerProtocol {
     /// Whether TV is muted
     public private(set) var isMuted: Bool = false
     
-    /// Current input
+    /// The TV input in front, or nil when the TV is showing an app or nothing is known.
     public private(set) var currentInput: TVInputType?
+
+    /// What the TV is showing: one of its inputs, an app, or unknown.
+    public private(set) var foreground: TVForeground = .unknown
+
+    /// True after the TV refused or ignored pairing. Automatic connects stop until the user
+    /// connects by hand, so the TV is never prompted in a loop.
+    public private(set) var pairingRequiresUser = false
+
+    /// Kinds of automation currently suspended by the action governor.
+    public private(set) var suspendedAutomation: [ActionGovernor.Kind] = []
+
+    /// Media keys are wanted but macOS Accessibility permission is missing.
+    public private(set) var isMediaKeyPermissionMissing = false
+
+    /// The OLED panel's maintenance state; nil without root access or on a TV that lacks it.
+    public private(set) var panelCare: PanelCareStatus?
+
+    /// When the app switched the TV off for a pixel refresh that is still being left alone.
+    public private(set) var pixelRefreshStartedAt: Date?
     
     /// Current sound output
     public private(set) var soundOutput: TVSoundOutput = .unknown
@@ -110,8 +139,22 @@ public final class TVController: TVControllerProtocol {
     private let keychainManager: KeychainManagerProtocol
     private let mediaKeyManager: MediaKeyManagerProtocol
     private let launchAtLoginManager: LaunchAtLoginManagerProtocol
+    /// Nil disables probing and background reconnects (unit tests with mocked transports).
+    private let reachabilityProbe: TVReachabilityProbing?
+    /// Seconds since the last keyboard or mouse input. Nil reads as "someone is here".
+    private let userIdleSeconds: (@MainActor () -> TimeInterval)?
+    private let panelCareGraceDelay: Duration
+    private let panelCarePollInterval: Duration
     /// Diagnostic logger for troubleshooting and log export
     public let diagnosticLogger: DiagnosticLoggerProtocol
+
+    /// Optional shell access to a rooted TV.
+    public let rootAccess: RootAccessService
+
+    @ObservationIgnored
+    private lazy var privilegedCalls = TVPrivilegedCalls(client: webOSClient, root: rootAccess) { [weak self] level, message, metadata in
+        self?.logDiagnostic(level: level, category: "PrivilegedCalls", message: message, metadata: metadata)
+    }
     
     private let logger = Logger(subsystem: "com.lgtvmenubar", category: "TVController")
     private let mediaKeyEnabledKey = "isMediaKeyControlEnabled"
@@ -140,6 +183,57 @@ public final class TVController: TVControllerProtocol {
     /// Shared connection task used to avoid restarting a pairing handshake.
     @ObservationIgnored
     private var connectTask: Task<Void, Error>?
+
+    /// Identifies the task in `connectTask`, so a finished attempt cannot clear a newer one.
+    @ObservationIgnored
+    private var connectTaskID: UInt64 = 0
+
+    /// Background loop that reconnects once the TV is reachable again.
+    @ObservationIgnored
+    private var reconnectTask: Task<Void, Never>?
+
+    /// Set between the Mac's sleep and wake notifications. Nothing reconnects while asleep.
+    @ObservationIgnored
+    private var isMacAsleep = false
+
+    /// Loop guard for every automatic action that changes the TV.
+    @ObservationIgnored
+    private var governor = ActionGovernor()
+
+    /// The user chose Disconnect; background reconnects stay off until they connect again.
+    @ObservationIgnored
+    private var userDisconnected = false
+
+    /// Position in `ReconnectSchedule`. Kept across reconnect loops so a TV that accepts a
+    /// connection and drops it straight away is retried with backoff, not every two seconds.
+    @ObservationIgnored
+    private var reconnectAttempt = 0
+
+    @ObservationIgnored
+    private var lastConnectedAt: ContinuousClock.Instant?
+
+    /// Waits out a brief lock or display sleep before switching the TV off for a refresh.
+    @ObservationIgnored
+    private var downtimeTask: Task<Void, Never>?
+
+    /// Watches a refresh in progress and ends the quiet period when it finishes.
+    @ObservationIgnored
+    private var refreshMonitorTask: Task<Void, Never>?
+
+    /// Between the lock and unlock notifications. A refresh is only made room for while this
+    /// is true (or the Mac is asleep); it never takes the display from someone using the Mac.
+    @ObservationIgnored
+    private var isMacLocked = false
+
+    /// A wake that arrived with nobody at the Mac while a refresh was running.
+    @ObservationIgnored
+    private var heldWakeReason: String?
+
+    /// One-off delay for the next reconnect check, used after finding the TV in standby.
+    @ObservationIgnored
+    private var reconnectDelayOverride: Duration?
+
+    private static let standbyRecheckDelay: Duration = .seconds(300)
     
     /// Timestamp of last sleep execution (for debouncing rapid sleep events)
     private var lastSleepExecution: Date = .distantPast
@@ -163,6 +257,8 @@ public final class TVController: TVControllerProtocol {
         case alreadyAwake
         case screenOnSent
         case needsPowerOn
+        /// Active Standby: the TV is off as far as the viewer is concerned, but still answering.
+        case standby
         case connectionLost
         case skipped
     }
@@ -177,6 +273,11 @@ public final class TVController: TVControllerProtocol {
         mediaKeyManager: MediaKeyManagerProtocol,
         launchAtLoginManager: LaunchAtLoginManagerProtocol,
         diagnosticLogger: DiagnosticLoggerProtocol,
+        reachabilityProbe: TVReachabilityProbing? = nil,
+        rootAccess: RootAccessService? = nil,
+        userIdleSeconds: (@MainActor () -> TimeInterval)? = nil,
+        panelCareGraceDelay: Duration = .seconds(60),
+        panelCarePollInterval: Duration = .seconds(30),
         sleepDebounceInterval: TimeInterval = 10.0,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
@@ -190,6 +291,11 @@ public final class TVController: TVControllerProtocol {
         self.mediaKeyManager = mediaKeyManager
         self.launchAtLoginManager = launchAtLoginManager
         self.diagnosticLogger = diagnosticLogger
+        self.reachabilityProbe = reachabilityProbe
+        self.rootAccess = rootAccess ?? RootAccessService(keychain: keychainManager)
+        self.userIdleSeconds = userIdleSeconds
+        self.panelCareGraceDelay = panelCareGraceDelay
+        self.panelCarePollInterval = panelCarePollInterval
         self.sleepDebounceInterval = max(0, sleepDebounceInterval)
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
@@ -214,6 +320,11 @@ public final class TVController: TVControllerProtocol {
         launchAtLoginManager: LaunchAtLoginManagerProtocol,
         diagnosticLogger: DiagnosticLoggerProtocol,
         arylicClient: ArylicVolumeClientProtocol?,
+        reachabilityProbe: TVReachabilityProbing? = nil,
+        rootAccess: RootAccessService? = nil,
+        userIdleSeconds: (@MainActor () -> TimeInterval)? = nil,
+        panelCareGraceDelay: Duration = .seconds(60),
+        panelCarePollInterval: Duration = .seconds(30),
         sleepDebounceInterval: TimeInterval = 10.0,
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
@@ -228,6 +339,11 @@ public final class TVController: TVControllerProtocol {
         self.launchAtLoginManager = launchAtLoginManager
         self.diagnosticLogger = diagnosticLogger
         self.arylicClient = arylicClient
+        self.reachabilityProbe = reachabilityProbe
+        self.rootAccess = rootAccess ?? RootAccessService(keychain: keychainManager)
+        self.userIdleSeconds = userIdleSeconds
+        self.panelCareGraceDelay = panelCareGraceDelay
+        self.panelCarePollInterval = panelCarePollInterval
         self.sleepDebounceInterval = max(0, sleepDebounceInterval)
         self.wakeConnectInitialDelay = wakeConnectInitialDelay
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
@@ -249,14 +365,16 @@ public final class TVController: TVControllerProtocol {
             keychainManager: KeychainManager(),
             mediaKeyManager: MediaKeyManager(),
             launchAtLoginManager: LaunchAtLoginManager(),
-            diagnosticLogger: DiagnosticLogger()
+            diagnosticLogger: DiagnosticLogger(),
+            reachabilityProbe: TCPReachabilityProbe(),
+            userIdleSeconds: {
+                // ~0 asks for any input event type.
+                CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0) ?? .null)
+            }
         )
-        
-        // Load persisted media key preference (without triggering didSet)
-        let savedValue = UserDefaults.standard.bool(forKey: mediaKeyEnabledKey)
-        if savedValue {
-            // Set directly to avoid didSet during init
-            self.isMediaKeyControlEnabled = savedValue
+
+        if UserDefaults.standard.bool(forKey: mediaKeyEnabledKey) {
+            self.isMediaKeyControlEnabled = true
         }
     }
     
@@ -267,20 +385,51 @@ public final class TVController: TVControllerProtocol {
         let data = try JSONEncoder().encode(config)
         UserDefaults.standard.set(data, forKey: configurationKey)
         self.configuration = config
+        rootAccess.configurationDidChange()
+        configurationDidChange?(config)
         logger.info("Configuration saved for \(config.name)")
     }
     
+    /// Changes the saved configuration in place. Views use this instead of rebuilding the whole
+    /// value, so a field added later is never reset by a form that does not know about it.
+    public func updateConfiguration(_ mutate: (inout TVConfiguration) -> Void) throws {
+        guard var config = configuration else {
+            throw LGTVError.tvNotFound
+        }
+        mutate(&config)
+        guard config != configuration else { return }
+        try saveConfiguration(config)
+    }
+
     /// Clear TV configuration from UserDefaults
     public func clearConfiguration() throws {
         UserDefaults.standard.removeObject(forKey: configurationKey)
         self.configuration = nil
+        rootAccess.configurationDidChange()
+        configurationDidChange?(nil)
         logger.info("Configuration cleared")
     }
     
     // MARK: - Connection
     
-    /// Connect to the configured TV
+    /// Connect to the configured TV. This is the user-initiated path: it may raise the pairing
+    /// prompt on the TV again after an earlier refusal.
     public func connect() async throws {
+        pairingRequiresUser = false
+        userDisconnected = false
+        try await connectSharingInFlightAttempt()
+    }
+
+    /// Connect on behalf of automation. Refuses while pairing needs the user, so a TV that
+    /// rejected pairing is not prompted again by a retry loop.
+    private func connectAutomatically() async throws {
+        guard !pairingRequiresUser else {
+            throw LGTVError.actionSuppressed("Pairing needs your attention. Choose Connect to pair with the TV again.")
+        }
+        try await connectSharingInFlightAttempt()
+    }
+
+    private func connectSharingInFlightAttempt() async throws {
         if let connectTask {
             logDiagnostic(
                 level: "info",
@@ -296,8 +445,14 @@ public final class TVController: TVControllerProtocol {
             try await self.performConnect()
         }
 
+        connectTaskID &+= 1
+        let taskID = connectTaskID
         connectTask = task
-        defer { connectTask = nil }
+        defer {
+            if connectTaskID == taskID {
+                connectTask = nil
+            }
+        }
 
         try await task.value
     }
@@ -310,10 +465,17 @@ public final class TVController: TVControllerProtocol {
         logger.info("Connecting to \(config.name)")
         logDiagnostic(level: "info", category: "TVController", message: "Connecting to TV", metadata: ["connectionState": "\(connectionState)"])
         
-        try await webOSClient.connect(to: config) { [weak self] state in
-            Task { @MainActor in
-                self?.applyWebOSConnectionState(state)
+        do {
+            try await webOSClient.connect(to: config) { [weak self] state in
+                Task { @MainActor in
+                    self?.applyWebOSConnectionState(state)
+                }
             }
+        } catch let error as LGTVError where error == .pairingRejected || error == .pairingTimeout {
+            pairingRequiresUser = true
+            syncConnectionStateFromWebOSClient()
+            logDiagnostic(level: "error", category: "TVController", message: "Pairing failed - automatic connects paused until the user reconnects", metadata: ["error": error.localizedDescription])
+            throw error
         }
 
         guard webOSClient.connectionState.isConnected else {
@@ -331,12 +493,62 @@ public final class TVController: TVControllerProtocol {
         #endif
     }
     
-    /// Disconnect from the TV
+    /// Disconnect because the user asked to. The app stays disconnected until the user connects
+    /// again or an automation trigger (Mac wake, opening the menu) calls for the TV.
     public func disconnect() {
+        userDisconnected = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        dropConnection()
+    }
+
+    /// Drops the socket after a change that invalidates it (such as a new address) and lets
+    /// reconnect supervision bring it back.
+    public func resetConnection() {
+        userDisconnected = false
+        dropConnection()
+    }
+
+    /// Closes the connection without recording a user decision. Automation uses this.
+    private func dropConnection() {
         connectTask?.cancel()
         connectTask = nil
         webOSClient.disconnect()
         connectionState = .disconnected
+    }
+
+    /// Reacts to a UI or system event according to `PowerPolicy`.
+    @discardableResult
+    public func handleAutomationTrigger(_ trigger: PowerPolicy.Trigger) -> Task<Void, Never>? {
+        guard let config = configuration else { return nil }
+
+        suspendedAutomation = governor.trippedKinds()
+        let decision = PowerPolicy.decision(for: trigger, config: config, isConnected: connectionState.isConnected)
+        logDiagnostic(level: "info", category: "TVController", message: "Automation trigger", metadata: [
+            "trigger": trigger.rawValue,
+            "decision": "\(decision)",
+            "connectionState": "\(connectionState)",
+            "wakeWithMac": "\(config.wakeWithMac)",
+            "wakeOnMenuOpen": "\(config.wakeOnMenuOpen)"
+        ])
+
+        switch decision {
+        case .wake:
+            return startWakeRecovery(reason: trigger.rawValue)
+        case .reconnectOnly:
+            return Task { @MainActor [weak self] in
+                await self?.reconnectIfReachable(reason: trigger.rawValue)
+            }
+        case .nothing:
+            return nil
+        }
+    }
+
+    /// Lets automation that the governor suspended run again.
+    public func resetSuspendedAutomation() {
+        governor.reset()
+        suspendedAutomation = []
+        logDiagnostic(level: "warning", category: "TVController", message: "Suspended automation reset by user")
     }
     
     /// Attempt to connect on app startup with retry logic
@@ -345,10 +557,13 @@ public final class TVController: TVControllerProtocol {
         
         logger.info("Auto-connecting to TV on startup")
         
+        pairingRequiresUser = false
+
         // Retry up to 3 times with increasing delays
         for attempt in 1...3 {
+            if pairingRequiresUser { break }
             do {
-                try await connect()
+                try await connectAutomatically()
                 logger.info("Auto-connect successful on attempt \(attempt)")
                 logDiagnostic(level: "info", category: "TVController", message: "Auto-connect successful", metadata: ["attempt": "\(attempt)"])
                 return
@@ -362,6 +577,7 @@ public final class TVController: TVControllerProtocol {
         }
         logger.error("Auto-connect failed after 3 attempts")
         logDiagnostic(level: "error", category: "TVController", message: "Auto-connect failed after 3 attempts")
+        ensureReconnectSupervision()
     }
     
     /// Wake TV via Wake-on-LAN
@@ -396,35 +612,78 @@ public final class TVController: TVControllerProtocol {
             return
         }
 
+        // A wake that got this far is wanted; a refresh in progress gives way to it.
+        endPixelRefreshWindow(outcome: "interrupted by \(reason)", resumeHeldWake: false)
+
         isWakeInProgress = true
-        defer { isWakeInProgress = false }
+        userDisconnected = false
+        defer {
+            isWakeInProgress = false
+            ensureReconnectSupervision()
+        }
+
+        // A connect already under way (possibly with the pairing prompt on screen) is joined, not
+        // restarted: tearing it down would cancel the prompt and raise a second one.
+        if connectionState.isTransitioning, let connectTask {
+            logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery waiting for in-flight connection", metadata: wakeMetadata(reason: reason, config: config))
+            _ = try? await connectTask.value
+        }
+
+        if pairingRequiresUser {
+            logDiagnostic(level: "warning", category: "TVController", message: "TV awake recovery skipped - pairing needs the user", metadata: wakeMetadata(reason: reason, config: config))
+            return
+        }
 
         logger.info("Ensuring TV is awake for reason: \(reason)")
         logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery started", metadata: wakeMetadata(reason: reason, config: config))
 
+        // Connected before this trigger, as opposed to connected by the quiet check below.
+        let wasConnectedAtStart = connectionState.isConnected
+
         do {
+            // A TV whose control port answers may already be on. Connect quietly and look
+            // before sending a wake: a TV found showing a picture is someone's to keep, so
+            // neither its power nor its input is touched.
+            if !connectionState.isConnected, await isTVReachable(config) {
+                logDiagnostic(level: "info", category: "TVController", message: "TV reachable before wake - connecting to check its state", metadata: wakeMetadata(reason: reason, config: config))
+                try? await connectAutomatically()
+                if pairingRequiresUser { return }
+            }
+
             if connectionState.isConnected {
                 let outcome = await ensureConnectedScreenIsOn(reason: reason, config: config)
-                if outcome == .screenOnSent {
-                    await performPostWakeActions(for: config)
+                switch outcome {
+                case .screenOnSent:
+                    await performPostWakeActions(for: config, reason: reason)
                     return
-                }
-                if outcome != .needsPowerOn && outcome != .connectionLost {
+                case .alreadyAwake, .skipped:
                     return
+                case .standby where wasConnectedAtStart:
+                    // The session has been up since the TV was on, so it has only just gone
+                    // into standby and may be running its pixel refresher. Leave it to finish.
+                    logDiagnostic(level: "warning", category: "TVController", message: "TV pixel refresher active - recovery skipped", metadata: wakeMetadata(reason: reason, config: config))
+                    return
+                case .needsPowerOn, .standby, .connectionLost:
+                    break
                 }
             }
 
-            disconnect()
+            guard permit(.powerOn, reason: reason) else { return }
+
+            dropConnection()
             logWakeDiagnostics(reason: reason, config: config)
             try await sendWakePackets(config: config, reason: reason)
             try await connectAfterWake(reason: reason, config: config)
 
             let outcome = await ensureConnectedScreenIsOn(reason: reason, config: config)
-            if outcome == .skipped || outcome == .needsPowerOn {
+            if outcome == .skipped || outcome == .needsPowerOn || outcome == .standby {
                 return
             }
 
-            await performPostWakeActions(for: config)
+            // Reaching here means the TV was off or unreachable and this app turned it on.
+            await performPostWakeActions(for: config, reason: reason)
+        } catch is CancellationError {
+            logDiagnostic(level: "info", category: "TVController", message: "TV awake recovery cancelled", metadata: wakeMetadata(reason: reason, config: config))
         } catch {
             logger.error("Failed to ensure TV is awake: \(error.localizedDescription)")
             logDiagnostic(level: "error", category: "TVController", message: "Failed to ensure TV is awake", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
@@ -433,6 +692,25 @@ public final class TVController: TVControllerProtocol {
 
     @discardableResult
     internal func startWakeRecovery(reason: String) -> Task<Void, Never> {
+        isMacAsleep = false
+        handleDowntimeEnded()
+
+        if let started = pixelRefreshStartedAt {
+            let trigger = PowerPolicy.Trigger(rawValue: reason) ?? .userRequested
+            let idle = userIdleSeconds?() ?? 0
+            let elapsed = Date().timeIntervalSince(started)
+            if elapsed < PanelCarePolicy.maximumRefreshWindow,
+               PanelCarePolicy.wakeDecision(trigger: trigger, userIdleSeconds: idle) == .hold {
+                heldWakeReason = reason
+                logDiagnostic(level: "info", category: "PanelCare", message: "Wake held until the pixel refresh finishes", metadata: [
+                    "reason": reason,
+                    "userIdleSeconds": String(Int(idle)),
+                    "secondsIntoRefresh": String(Int(elapsed))
+                ])
+                return wakeRecoveryTask ?? Task {}
+            }
+        }
+
         if isWakeRecoveryQueued || isWakeInProgress {
             if let config = configuration {
                 logDiagnostic(level: "info", category: "TVController", message: "Wake attempt ignored - already in progress", metadata: wakeMetadata(reason: reason, config: config))
@@ -579,12 +857,10 @@ public final class TVController: TVControllerProtocol {
             return
         }
         #endif
-        if isMuted {
-            try await webOSClient.sendCommand(.unmute)
-        } else {
-            try await webOSClient.sendCommand(.mute)
-        }
-        isMuted.toggle()
+        // Decided before the request: the TV's own update can arrive while it is in flight.
+        let target = !isMuted
+        try await webOSClient.sendCommand(target ? .mute : .unmute)
+        isMuted = target
     }
     
     #if LOCAL_ARYLIC_BUILD
@@ -615,6 +891,7 @@ public final class TVController: TVControllerProtocol {
     public func switchInput(_ input: TVInputType) async throws {
         try await webOSClient.sendCommand(.setInput(input.rawValue))
         currentInput = input
+        foreground = .input(input)
     }
     
     /// Set TV sound output
@@ -696,10 +973,230 @@ public final class TVController: TVControllerProtocol {
     public func setPCMode(for input: TVInputType, enabled: Bool) async throws {
         let icon = enabled ? "pc" : "hdmi"
         let label = enabled ? "PC" : input.displayName
-        try await webOSClient.sendCommand(.setDeviceInfo(inputId: input.rawValue, icon: icon, label: label))
+        do {
+            try await webOSClient.sendCommand(.setDeviceInfo(inputId: input.rawValue, icon: icon, label: label))
+        } catch LGTVError.commandFailed(let message) {
+            // Current firmware answers "401 insufficient permissions" on the pairing connection.
+            logDiagnostic(level: "info", category: "TVController", message: "Input label not writable over the pairing connection; using a privileged call", metadata: ["error": message])
+            try await privilegedCalls.invokePrivileged(
+                "luna://com.webos.service.eim/setDeviceInfo",
+                parameters: ["id": input.rawValue, "icon": "\(icon).png", "label": label]
+            )
+        }
+        capabilities?.inputIcons[input.rawValue] = "\(icon).png"
         logger.info("Set PC mode \(enabled ? "enabled" : "disabled") for \(input.rawValue)")
     }
     
+    // MARK: - Picture Settings
+
+    /// The TV's current picture mode (for the content type currently playing).
+    public func readPictureMode() async throws -> String {
+        try await privilegedCalls.readPictureMode()
+    }
+
+    public func setPictureMode(_ mode: String) async throws {
+        try await privilegedCalls.setPictureMode(mode)
+    }
+
+    /// Whether the TV labels the given input as a PC, from a fresh input list. Nil when the TV
+    /// would not say, so callers do not "correct" something they cannot see.
+    public func isPCMode(inputID: String) async -> Bool? {
+        await refreshInputList()
+        guard let icon = capabilities?.inputIcons[inputID] else { return nil }
+        return TVInputInfo.iconIndicatesPC(icon)
+    }
+
+    /// Asks for the input list over the pairing connection, and through the root shell when
+    /// that does not deliver one.
+    private func refreshInputList() async {
+        let before = capabilities?.inputs
+        capabilities?.inputs = []
+        try? await webOSClient.sendCommand(.getInputList)
+        if capabilities?.inputs.isEmpty == false { return }
+
+        if rootAccess.isUsable, let inputs = try? await rootAccess.inputList(), !inputs.isEmpty {
+            applyInputList(inputs)
+        } else {
+            // No fresh answer either way. Keep the names for the pickers, but report the PC
+            // label as unknown rather than repeat a stale value.
+            capabilities?.inputs = before ?? []
+            capabilities?.inputIcons = [:]
+        }
+    }
+
+    private func applyInputList(_ inputs: [TVInputInfo]) {
+        if capabilities == nil {
+            capabilities = TVCapabilities()
+        }
+        capabilities?.inputs = inputs
+        capabilities?.inputIcons = Dictionary(inputs.map { ($0.id, $0.icon) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    // MARK: - Panel Care
+
+    /// Reads the panel's maintenance state through the root shell.
+    public func refreshPanelCare() async {
+        #if UX_TESTING_APP
+        return
+        #else
+        guard rootAccess.isUsable else {
+            panelCare = nil
+            return
+        }
+        do {
+            let status = try await rootAccess.panelCareStatus()
+            if status != panelCare {
+                logDiagnostic(level: "info", category: "PanelCare", message: "Panel-care state", metadata: [
+                    "panelHours": "\(status.panelHours)",
+                    "hoursSinceShortRefresh": "\(status.hoursSinceShortRefresh)",
+                    "shortRefreshIntervalHours": "\(status.shortRefreshIntervalHours)",
+                    "hoursSinceLongRefresh": "\(status.hoursSinceLongRefresh)",
+                    "longRefreshIntervalHours": "\(status.longRefreshIntervalHours)",
+                    "isRefreshDue": "\(status.isRefreshDue)"
+                ])
+            }
+            panelCare = status
+        } catch {
+            logDiagnostic(level: "info", category: "PanelCare", message: "Panel-care state not available", metadata: ["error": error.localizedDescription])
+        }
+        #endif
+    }
+
+    private func handleDowntimeBegan(_ reason: String) {
+        isMacLocked = true
+        guard configuration?.refreshPixelsDuringDowntime == true, pixelRefreshStartedAt == nil, downtimeTask == nil else { return }
+
+        logDiagnostic(level: "info", category: "PanelCare", message: "Mac downtime began", metadata: ["reason": reason])
+        downtimeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                // A quick lock-and-unlock should not switch the TV off.
+                try await Task.sleep(for: self.panelCareGraceDelay)
+            } catch {
+                return
+            }
+            self.downtimeTask = nil
+            await self.powerOffForPixelRefreshIfDue(reason: reason)
+        }
+    }
+
+    private func handleDowntimeEnded(unlocked: Bool = false) {
+        if unlocked {
+            isMacLocked = false
+        }
+        downtimeTask?.cancel()
+        downtimeTask = nil
+    }
+
+    private func powerOffForPixelRefreshIfDue(reason: String) async {
+        guard let config = configuration else { return }
+
+        if connectionState.isConnected {
+            await refreshPanelCare()
+            try? await webOSClient.sendCommand(.getCurrentForegroundAppInfo)
+        }
+
+        let decision = PanelCarePolicy.powerOffDecision(
+            isEnabled: config.refreshPixelsDuringDowntime,
+            isMacLocked: isMacLocked,
+            status: panelCare,
+            isConnected: connectionState.isConnected,
+            foreground: foreground,
+            preferredInput: config.preferredInput
+        )
+        logDiagnostic(level: "info", category: "PanelCare", message: "Downtime decision", metadata: [
+            "reason": reason,
+            "decision": "\(decision)",
+            "isMacLocked": "\(isMacLocked)",
+            "foreground": foreground.diagnosticDescription,
+            "isRefreshDue": panelCare.map { "\($0.isRefreshDue)" } ?? "unknown",
+            "connectionState": "\(connectionState)"
+        ])
+
+        guard decision == .powerOff, permit(.powerOff, reason: "pixelRefresh") else { return }
+
+        do {
+            try await powerOff()
+        } catch {
+            logDiagnostic(level: "error", category: "PanelCare", message: "Could not switch the TV off for a pixel refresh", metadata: ["error": error.localizedDescription])
+            return
+        }
+        beginPixelRefreshWindow(reason: reason)
+        dropConnection()
+    }
+
+    /// Starts the quiet period: no reconnects and no unattended wakes until the TV reports the
+    /// refresh done, stops answering, or the window runs out.
+    private func beginPixelRefreshWindow(reason: String) {
+        pixelRefreshStartedAt = Date()
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        logDiagnostic(level: "info", category: "PanelCare", message: "TV switched off for a pixel refresh", metadata: ["reason": reason])
+
+        refreshMonitorTask?.cancel()
+        refreshMonitorTask = Task { @MainActor [weak self] in
+            var unanswered = 0
+            while true {
+                guard let interval = self?.panelCarePollInterval else { return }
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard let self, let started = self.pixelRefreshStartedAt else { return }
+
+                if Date().timeIntervalSince(started) >= PanelCarePolicy.maximumRefreshWindow {
+                    self.endPixelRefreshWindow(outcome: "window elapsed")
+                    return
+                }
+                if self.isMacAsleep { continue }
+
+                do {
+                    let status = try await self.rootAccess.panelCareStatus()
+                    self.panelCare = status
+                    unanswered = 0
+                    if !status.isRefreshDue {
+                        self.endPixelRefreshWindow(outcome: "refresh completed")
+                        return
+                    }
+                } catch {
+                    // The TV goes fully to sleep when it has finished.
+                    unanswered += 1
+                    if unanswered >= 3 {
+                        self.endPixelRefreshWindow(outcome: "TV stopped answering")
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    private func endPixelRefreshWindow(outcome: String, resumeHeldWake: Bool = true) {
+        guard let started = pixelRefreshStartedAt else { return }
+        pixelRefreshStartedAt = nil
+        refreshMonitorTask?.cancel()
+        refreshMonitorTask = nil
+        let heldReason = heldWakeReason
+        heldWakeReason = nil
+
+        logDiagnostic(level: "info", category: "PanelCare", message: "Pixel refresh quiet period ended", metadata: [
+            "outcome": outcome,
+            "seconds": String(Int(Date().timeIntervalSince(started))),
+            "heldWake": heldReason ?? "none"
+        ])
+
+        if resumeHeldWake, let heldReason, !isMacAsleep {
+            startWakeRecovery(reason: heldReason)
+        } else {
+            ensureReconnectSupervision()
+        }
+    }
+
+    /// Lets other automation (Display Lock) draw on the same loop guard as power automation.
+    public func permitAutomaticAction(_ kind: ActionGovernor.Kind, reason: String) -> Bool {
+        permit(kind, reason: reason)
+    }
+
     // MARK: - Launch at Login
     
     /// Check if launch at login is enabled
@@ -731,9 +1228,13 @@ public final class TVController: TVControllerProtocol {
     }
 
     #if UX_TESTING_APP
+    enum UXScenario: String, CaseIterable {
+        case connected, appInFront, disconnected, pairingNeeded, connectionLost, automationPaused, noTV, rooted, pixelRefresh
+    }
+
     /// Seed stable UI state for the regular-window UX validation build without writing user defaults.
-    public func applyUXTestingFixture() {
-        configuration = TVConfiguration(
+    func applyUXTestingFixture(_ scenario: UXScenario = .connected) {
+        var config = TVConfiguration(
             name: "LG C2",
             ipAddress: "192.168.88.24",
             macAddress: "AA:BB:CC:DD:EE:FF",
@@ -747,18 +1248,57 @@ public final class TVController: TVControllerProtocol {
             wakePort: 9,
             wakeTimeoutSeconds: 90
         )
-        connectionState = .connected
-        capabilities = TVCapabilities(
+        config.displayLock = DisplayLockProfile(
+            isEnabled: true,
+            mode: DisplayModeSpec(pixelWidth: 3840, pixelHeight: 2160, pointWidth: 3840, pointHeight: 2160, refreshRate: 120),
+            hdrEnabled: true,
+            enforcePCMode: true,
+            pictureMode: "game"
+        )
+        if scenario == .rooted || scenario == .pixelRefresh {
+            config.refreshPixelsDuringDowntime = true
+            config.rootAccess = RootAccessSettings(isEnabled: true, trustedHostKeyFingerprint: "SHA256:Zm9yLXNjcmVlbnNob3RzLW9ubHktbm90LWEta2V5")
+        }
+
+        configuration = scenario == .noTV ? nil : config
+        rootAccess.configurationDidChange()
+        pairingRequiresUser = scenario == .pairingNeeded
+        suspendedAutomation = scenario == .automationPaused ? [.powerOn, .inputSwitch] : []
+
+        switch scenario {
+        case .disconnected, .pairingNeeded, .noTV, .pixelRefresh:
+            connectionState = .disconnected
+        case .connectionLost:
+            connectionState = .error(LGTVError.connectionFailed("The TV stopped responding"))
+        default:
+            connectionState = .connected
+        }
+
+        let fixtureCapabilities = TVCapabilities(
             modelName: "HE_DTV_W22O_AFABATAA",
             chipType: "W22O",
             modelYear: 2022,
-            webOSVersion: "webOS 24",
+            webOSVersion: "webOSTV 7.0",
             usesSSL: true
         )
+        fixtureCapabilities.displayModel = "OLED42C24LA"
+        fixtureCapabilities.firmwareVersion = "03.33.85"
+        fixtureCapabilities.inputs = [
+            TVInputInfo(id: "HDMI_1", label: "PC", icon: "pc.png", isConnected: true),
+            TVInputInfo(id: "HDMI_2", label: "PlayStation", icon: "game.png", isConnected: true),
+            TVInputInfo(id: "HDMI_3", label: "HDMI 3", icon: "hdmi.png", isConnected: false),
+            TVInputInfo(id: "HDMI_4", label: "HDMI 4", icon: "hdmi.png", isConnected: false)
+        ]
+        capabilities = fixtureCapabilities
         volume = 32
         isMuted = false
-        currentInput = .hdmi1
-        soundOutput = .externalArc
+        foreground = scenario == .appInFront ? .app("netflix") : .input(.hdmi1)
+        currentInput = foreground.input
+        panelCare = scenario == .rooted || scenario == .pixelRefresh
+            ? PanelCareStatus(panelHours: 6133, shortRefreshLastHours: 6019, shortRefreshIntervalHours: 4, shortRefreshCount: 424, longRefreshLastHours: 5592, longRefreshIntervalHours: 500, longRefreshCount: 11, isRefreshDue: true)
+            : nil
+        pixelRefreshStartedAt = scenario == .pixelRefresh ? Date().addingTimeInterval(-180) : nil
+        soundOutput = .tvSpeaker
         isMediaKeyControlEnabled = false
     }
     #endif
@@ -766,24 +1306,41 @@ public final class TVController: TVControllerProtocol {
     // MARK: - Private Methods
     
     private func setupCallbacks() {
+        rootAccess.configurationProvider = { [weak self] in self?.configuration }
+        rootAccess.trustHostKey = { [weak self] fingerprint in
+            try? self?.updateConfiguration { $0.rootAccess.trustedHostKeyFingerprint = fingerprint }
+        }
+        rootAccess.log = { [weak self] level, message, metadata in
+            self?.logDiagnostic(level: level, category: "RootAccess", message: message, metadata: metadata)
+        }
+
         // WebOS capability updates
         webOSClient.setCapabilityCallback { [weak self] capabilities in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.capabilities = capabilities
             }
         }
         
-        // WebOS input changes
+        // The client always calls back on the main actor. Applying state synchronously means a
+        // caller that awaits a confirmed request sees the resulting state as soon as it resumes.
         webOSClient.setInputChangeCallback { [weak self] input in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
                 self.currentInput = input
-                if self.isDiagnosticCaptureActive {
-                    self.logDiagnostic(level: "warning", category: "TVController", message: "Current input updated", metadata: ["currentInput": input.displayName])
-                }
+                self.setForeground(.input(input))
             }
+        }
+
+        webOSClient.setForegroundChangeCallback { [weak self] foreground in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.currentInput = foreground.input
+                self.setForeground(foreground)
+            }
+        }
+
+        webOSClient.setLogCallback { [weak self] level, message, metadata in
+            self?.logDiagnostic(level: level, category: "WebOSClient", message: message, metadata: metadata)
         }
         
         // WebOS volume changes
@@ -797,16 +1354,12 @@ public final class TVController: TVControllerProtocol {
         
         // WebOS input list updates (for PC mode detection)
         webOSClient.setInputListCallback { [weak self] inputIcons in
-            guard let self = self else { return }
-            Task { @MainActor [weak self] in
-                self?.capabilities?.inputIcons = inputIcons
-                // Log PC mode status for preferred input
-                if let config = self?.configuration,
-                   let preferredInputIcon = inputIcons[config.preferredInput] {
-                    if preferredInputIcon.contains("pc") {
-                        self?.logger.info("TV input \(config.preferredInput) is in PC mode")
-                    }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.capabilities == nil {
+                    self.capabilities = TVCapabilities()
                 }
+                self.capabilities?.inputIcons = inputIcons
             }
         }
         
@@ -840,6 +1393,7 @@ public final class TVController: TVControllerProtocol {
         var powerManagerMutable = powerManager
         powerManagerMutable.onWake = { [weak self] in
             self?.startWakeRecovery(reason: "systemWake")
+            self?.ensureReconnectSupervision()
         }
         
         powerManagerMutable.onSleep = { [weak self] in
@@ -854,14 +1408,21 @@ public final class TVController: TVControllerProtocol {
         }
 
         powerManagerMutable.onScreenUnlock = { [weak self] in
+            self?.handleDowntimeEnded(unlocked: true)
             self?.startWakeRecovery(reason: "screenUnlock")
         }
+
+        powerManagerMutable.onScreenLock = { [weak self] in
+            self?.handleDowntimeBegan("screenLocked")
+        }
+
         
         // Start monitoring
         powerManager.startMonitoring()
     }
     
     private func loadConfiguration() {
+        defer { rootAccess.configurationDidChange() }
         guard let data = UserDefaults.standard.data(forKey: configurationKey) else {
             configuration = nil
             return
@@ -923,10 +1484,11 @@ public final class TVController: TVControllerProtocol {
         var attempt = 1
 
         while attempt <= wakeConnectMaxAttempts && clock.now < deadline {
+            // Mac sleep cancels wake recovery; stop here instead of waking a TV for a sleeping Mac.
             if attempt == 1 {
-                try? await Task.sleep(for: wakeConnectInitialDelay)
+                try await Task.sleep(for: wakeConnectInitialDelay)
             } else {
-                try? await Task.sleep(for: wakeConnectRetryDelay)
+                try await Task.sleep(for: wakeConnectRetryDelay)
             }
 
             let elapsedSeconds = durationSecondsString(startedAt.duration(to: clock.now))
@@ -944,7 +1506,7 @@ public final class TVController: TVControllerProtocol {
             do {
                 logger.info("Wake reconnect attempt \(attempt)")
                 logDiagnostic(level: "info", category: "TVController", message: "Wake reconnect attempt", metadata: metadata)
-                try await connect()
+                try await connectAutomatically()
                 logger.info("Wake reconnect succeeded on attempt \(attempt)")
                 let successMetadata = wakeMetadata(
                     reason: reason,
@@ -966,6 +1528,9 @@ public final class TVController: TVControllerProtocol {
                     "wakeTimeoutSeconds": timeoutSeconds,
                     "error": error.localizedDescription
                 ]))
+                if pairingRequiresUser || Task.isCancelled {
+                    throw error
+                }
                 resetConnectionAfterWakeFailure(reason: reason, config: config, attempt: attempt)
             }
 
@@ -993,8 +1558,11 @@ public final class TVController: TVControllerProtocol {
                 logDiagnostic(level: "info", category: "TVController", message: "TV is already turning off - recovery skipped", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
                 return .skipped
             case .pixelRefresher:
-                logDiagnostic(level: "warning", category: "TVController", message: "TV pixel refresher active - recovery skipped", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
-                return .skipped
+                // Reported both while the pixel refresher runs and by TVs that keep their network
+                // up in standby. The caller decides: before a wake it means "send the wake";
+                // after one it means "leave it be".
+                logDiagnostic(level: "warning", category: "TVController", message: "TV in active standby", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
+                return .standby
             case .unknown:
                 logger.warning("TV power state unknown; sending screen-on as fallback")
                 logDiagnostic(level: "warning", category: "TVController", message: "TV power state unknown - sending screen on", metadata: wakeMetadata(reason: reason, config: config, additional: powerStatus.diagnosticMetadata))
@@ -1031,12 +1599,39 @@ public final class TVController: TVControllerProtocol {
                 logDiagnostic(level: "info", category: "TVController", message: "TV connection lost during screen-on - wake reconnect required", metadata: wakeMetadata(reason: reason, config: config, additional: ["error": error.localizedDescription]))
                 return .connectionLost
             }
+            // The TV answered and declined, which is what a screen that is already on does.
+            if case LGTVError.commandFailed = error {
+                return .alreadyAwake
+            }
             return .skipped
         }
     }
 
-    private func performPostWakeActions(for config: TVConfiguration) async {
-        if config.switchInputOnWake, let input = TVInputType(rawValue: config.preferredInput) {
+    private func performPostWakeActions(for config: TVConfiguration, reason: String) async {
+        // The input list says whether the Mac's input already carries the PC label. Ask for it
+        // now; right after a wake the session bootstrap may not have delivered it yet.
+        // Unknown counts as "already set", so the label is never written blind on every wake.
+        var preferredInputIsPCMode = true
+        if config.enablePCMode {
+            preferredInputIsPCMode = await isPCMode(inputID: config.preferredInput) ?? true
+        }
+
+        let actions = PowerPolicy.postWakeActions(
+            config: config,
+            foreground: foreground,
+            preferredInputIsPCMode: preferredInputIsPCMode
+        )
+
+        logDiagnostic(level: "info", category: "TVController", message: "Post-wake decision", metadata: wakeMetadata(reason: reason, config: config, additional: [
+            "foreground": foreground.diagnosticDescription,
+            "preferredInputIsPCMode": "\(preferredInputIsPCMode)",
+            "switchInput": "\(actions.switchInput)",
+            "setPCMode": "\(actions.setPCMode)"
+        ]))
+
+        guard let input = TVInputType(rawValue: config.preferredInput) else { return }
+
+        if actions.switchInput, permit(.inputSwitch, reason: reason) {
             do {
                 try await switchInput(input)
             } catch {
@@ -1045,21 +1640,27 @@ public final class TVController: TVControllerProtocol {
             }
         }
 
-        guard config.enablePCMode else { return }
-
-        let currentIcon = capabilities?.inputIcons[config.preferredInput] ?? ""
-        guard !currentIcon.contains("pc"), let input = TVInputType(rawValue: config.preferredInput) else { return }
-
-        do {
-            logger.info("Setting PC mode for \(config.preferredInput)")
-            try await setPCMode(for: input, enabled: true)
-        } catch {
-            logger.warning("Failed to set PC mode after wake: \(error.localizedDescription)")
-            logDiagnostic(level: "warning", category: "TVController", message: "Failed to set PC mode after wake", metadata: ["error": error.localizedDescription, "preferredInput": config.preferredInput])
+        if actions.setPCMode, permit(.tvSettingWrite, reason: reason) {
+            do {
+                logger.info("Setting PC mode for \(config.preferredInput)")
+                try await setPCMode(for: input, enabled: true)
+            } catch {
+                logger.warning("Failed to set PC mode after wake: \(error.localizedDescription)")
+                logDiagnostic(level: "warning", category: "TVController", message: "Failed to set PC mode after wake", metadata: ["error": error.localizedDescription, "preferredInput": config.preferredInput])
+            }
         }
     }
     
     private func handleMacSleep() async {
+        isMacAsleep = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+
+        if isWakeInProgress || isWakeRecoveryQueued {
+            wakeRecoveryTask?.cancel()
+            logDiagnostic(level: "info", category: "TVController", message: "Mac sleeping - cancelling TV awake recovery")
+        }
+
         guard let config = configuration else {
             logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - no configuration")
             return
@@ -1079,38 +1680,240 @@ public final class TVController: TVControllerProtocol {
             return
         }
         lastSleepExecution = now
-        
-        // Don't sleep TV if user is on a different input (e.g., watching console, streaming device)
-        if let currentInput = currentInput {
-            if currentInput.rawValue != config.preferredInput {
-                logger.info("Skipping TV sleep - TV is on different input: \(currentInput.displayName) (preferred: \(config.preferredInput))")
-                logDiagnostic(level: "info", category: "TVController", message: "Skipping TV sleep - different input", metadata: ["currentInput": currentInput.displayName, "preferredInput": config.preferredInput])
-                disconnect()
+
+        // Ask the TV what is in front right now rather than trusting the last subscription update.
+        if connectionState.isConnected {
+            try? await webOSClient.sendCommand(.getCurrentForegroundAppInfo)
+        }
+
+        let decision = PowerPolicy.sleepDecision(config: config, isConnected: connectionState.isConnected, foreground: foreground)
+        var metadata = tvIdentityMetadata(for: config)
+        metadata["foreground"] = foreground.diagnosticDescription
+        metadata["connectionState"] = "\(connectionState)"
+        metadata["decision"] = "\(decision)"
+
+        switch decision {
+        case .leaveOn(let reason):
+            logger.info("Skipping TV sleep - \(reason)")
+            metadata["currentInput"] = currentInput?.displayName ?? foreground.diagnosticDescription
+            logDiagnostic(level: "info", category: "TVController", message: "Skipping TV sleep - different input", metadata: metadata)
+            dropConnection()
+        case .skip(let reason):
+            logDiagnostic(level: "warning", category: "TVController", message: "TV sleep skipped - \(reason)", metadata: metadata)
+            dropConnection()
+        case .powerOff:
+            guard permit(.powerOff, reason: "macSleep") else {
+                dropConnection()
                 return
             }
+            logger.info("Mac sleeping - turning off TV")
+            logDiagnostic(level: "info", category: "TVController", message: "Mac sleeping - turning off TV", metadata: metadata)
+            do {
+                try await powerOff()
+            } catch {
+                logger.error("Failed to turn off TV: \(error.localizedDescription)")
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["error": error.localizedDescription])
+            }
+            if config.refreshPixelsDuringDowntime, panelCare?.isRefreshDue == true {
+                beginPixelRefreshWindow(reason: "macSleep")
+            }
+            dropConnection()
         }
-        // If currentInput is nil (unknown), we proceed with sleep as a safe default
-        // since we can't determine what the user is doing
-        
-        logger.info("Mac sleeping - turning off TV")
-        logDiagnostic(level: "info", category: "TVController", message: "Mac sleeping - turning off TV")
+    }
+
+    // MARK: - Reconnect Supervision
+
+    private func setForeground(_ newValue: TVForeground) {
+        guard foreground != newValue else { return }
+        logDiagnostic(level: "info", category: "TVController", message: "TV foreground changed", metadata: ["from": foreground.diagnosticDescription, "to": newValue.diagnosticDescription])
+        foreground = newValue
+        foregroundDidChange?(newValue)
+    }
+
+    private func handleConnectionStateChange() {
+        if connectionState.isConnected {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            lastConnectedAt = .now
+            Task { @MainActor [weak self] in
+                await self?.refreshRootBackedDetails()
+            }
+            return
+        }
+        if connectionState.isTransitioning { return }
+        ensureReconnectSupervision()
+    }
+
+    /// Fills in what only the root shell can tell: software version and panel-care state.
+    private func refreshRootBackedDetails() async {
+        #if UX_TESTING_APP
+        // Fixture state only; never open a shell to the placeholder address.
+        return
+        #else
+        if rootAccess.status == .notChecked {
+            await rootAccess.refresh()
+        }
+        guard let root = rootAccess.capabilities, connectionState.isConnected else { return }
+
+        if capabilities == nil {
+            capabilities = TVCapabilities()
+        }
+        if let platformModel = root.platformModel {
+            capabilities?.modelName = platformModel
+            if let parsed = TVCapabilities.parseChipType(from: platformModel) {
+                capabilities?.chipType = parsed.chip
+                capabilities?.modelYear = parsed.year
+            }
+        }
+        if let productName = root.productName {
+            capabilities?.webOSVersion = productName
+        }
+        if let firmwareVersion = root.firmwareVersion {
+            capabilities?.firmwareVersion = firmwareVersion
+        }
+        await refreshPanelCare()
+        #endif
+    }
+
+    private func isTVReachable(_ config: TVConfiguration) async -> Bool {
+        guard let reachabilityProbe else { return false }
+        return await reachabilityProbe.isReachable(host: config.ipAddress, timeout: .seconds(1))
+    }
+
+    private func reconnectIfReachable(reason: String) async {
+        guard let config = configuration,
+              !connectionState.isConnected,
+              !connectionState.isTransitioning,
+              !isWakeInProgress,
+              pixelRefreshStartedAt == nil,
+              !pairingRequiresUser else { return }
+        userDisconnected = false
+
+        guard await isTVReachable(config) else {
+            logDiagnostic(level: "info", category: "TVController", message: "Reconnect skipped - TV not reachable", metadata: ["reason": reason])
+            return
+        }
+
         do {
-            try await powerOff()
+            try await connectAutomatically()
+            logDiagnostic(level: "info", category: "TVController", message: "Reconnected", metadata: ["reason": reason])
         } catch {
-            logger.error("Failed to turn off TV: \(error.localizedDescription)")
-            logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["error": error.localizedDescription])
+            logDiagnostic(level: "warning", category: "TVController", message: "Reconnect failed", metadata: ["reason": reason, "error": error.localizedDescription])
         }
-        disconnect()
+    }
+
+    /// Starts the background reconnect loop if one is needed and allowed. The loop never wakes
+    /// the TV and never raises a pairing prompt more than once.
+    private func ensureReconnectSupervision() {
+        guard reachabilityProbe != nil,
+              configuration != nil,
+              reconnectTask == nil,
+              !isMacAsleep,
+              !pairingRequiresUser,
+              !userDisconnected,
+              pixelRefreshStartedAt == nil,
+              !connectionState.isConnected else { return }
+
+        // Start over only after a connection that lasted; one that dropped straight away
+        // continues the backoff where it left off.
+        if let lastConnectedAt, ContinuousClock.now - lastConnectedAt >= .seconds(60) {
+            reconnectAttempt = 0
+        } else if lastConnectedAt != nil {
+            reconnectAttempt += 1
+        }
+        lastConnectedAt = nil
+
+        logDiagnostic(level: "info", category: "TVController", message: "Reconnect supervision started", metadata: ["connectionState": "\(connectionState)", "attempt": "\(reconnectAttempt)"])
+
+        reconnectTask = Task { @MainActor [weak self] in
+            var attempt = self?.reconnectAttempt ?? 0
+            while true {
+                let delay = self?.reconnectDelayOverride ?? ReconnectSchedule.delay(forAttempt: attempt)
+                self?.reconnectDelayOverride = nil
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled else { return }
+
+                guard let config = self.configuration,
+                      !self.connectionState.isConnected,
+                      !self.pairingRequiresUser,
+                      !self.userDisconnected,
+                      self.pixelRefreshStartedAt == nil,
+                      !self.isMacAsleep else { break }
+                self.reconnectAttempt = attempt
+
+                if self.isWakeInProgress || self.connectionState.isTransitioning {
+                    continue
+                }
+
+                guard await self.isTVReachable(config) else {
+                    if ReconnectSchedule.shouldLog(attempt: attempt) {
+                        self.logDiagnostic(level: "debug", category: "TVController", message: "Reconnect check - TV not reachable", metadata: ["attempt": "\(attempt)"])
+                    }
+                    attempt += 1
+                    continue
+                }
+                guard !Task.isCancelled else { return }
+
+                do {
+                    try await self.connectAutomatically()
+                    // A TV in standby with its network up accepts connections. Holding one
+                    // would make the app look connected to a TV that is off, so let go and
+                    // look again later, at a pace that cannot keep the TV from sleeping.
+                    if let status = try? await self.webOSClient.getPowerStatus(),
+                       status.normalizedState == .pixelRefresher || status.normalizedState == .off {
+                        self.logDiagnostic(level: "info", category: "TVController", message: "Reconnected to a TV in standby - releasing", metadata: status.diagnosticMetadata)
+                        self.reconnectDelayOverride = Self.standbyRecheckDelay
+                        self.dropConnection()
+                        return
+                    }
+                    self.logDiagnostic(level: "info", category: "TVController", message: "Reconnected after connection loss", metadata: ["attempt": "\(attempt)"])
+                    break
+                } catch {
+                    self.logDiagnostic(level: "warning", category: "TVController", message: "Reconnect attempt failed", metadata: ["attempt": "\(attempt)", "error": error.localizedDescription])
+                    attempt += 1
+                }
+            }
+            if !Task.isCancelled {
+                self?.reconnectTask = nil
+            }
+        }
+    }
+
+    /// Asks the governor whether an automatic action may run, and records a refusal where the
+    /// user can see it.
+    private func permit(_ kind: ActionGovernor.Kind, reason: String) -> Bool {
+        let decision = governor.request(kind)
+        suspendedAutomation = governor.trippedKinds()
+
+        if case .tripped(let until) = decision {
+            logger.error("Automation suspended to prevent a loop: \(kind.rawValue)")
+            logDiagnostic(level: "error", category: "TVController", message: "Automation suspended to prevent a loop", metadata: [
+                "kind": kind.rawValue,
+                "reason": reason,
+                "suspendedUntil": ISO8601DateFormatter().string(from: until)
+            ])
+            return false
+        }
+        return true
     }
     
     private func updateMediaKeyCapture() async {
         if isMediaKeyControlEnabled && connectionState.isConnected {
             if !mediaKeyManager.hasAccessibilityPermission {
-                logger.warning("Disabling media key control - Accessibility permission not granted")
-                logDiagnostic(level: "warning", category: "TVController", message: "Disabling media key control - Accessibility permission not granted", metadata: appIdentityMetadata())
-                isMediaKeyControlEnabled = false
+                // The preference is kept: permission is lost on every ad-hoc rebuild, and
+                // silently switching the setting off made users re-enable it each time.
+                if !isMediaKeyPermissionMissing {
+                    logger.warning("Volume keys inactive - Accessibility permission not granted")
+                    logDiagnostic(level: "warning", category: "TVController", message: "Volume keys inactive - Accessibility permission not granted", metadata: appIdentityMetadata())
+                }
+                isMediaKeyPermissionMissing = true
                 return
             }
+            isMediaKeyPermissionMissing = false
             do {
                 try await mediaKeyManager.startMediaKeyCapture { [weak self] key in
                     Task { @MainActor in
@@ -1196,7 +1999,7 @@ public final class TVController: TVControllerProtocol {
             return
         }
 
-        disconnect()
+        dropConnection()
     }
 
     private func appIdentityMetadata() -> [String: String] {

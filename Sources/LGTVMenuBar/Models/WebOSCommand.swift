@@ -22,4 +22,5 @@ public enum WebOSCommand: Sendable {
     case screenOn
     case screenOff
     case setDeviceInfo(inputId: String, icon: String, label: String)
+    case getSystemInfo
 }

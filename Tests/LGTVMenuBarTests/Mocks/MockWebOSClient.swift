@@ -59,6 +59,24 @@ final class MockWebOSClient: WebOSClientProtocol {
     private var inputListCallback: (@Sendable ([String: String]) -> Void)?
     private var soundOutputChangeCallback: (@Sendable (TVSoundOutput) -> Void)?
     private var diagnosticPayloadCallback: ((String, String) -> Void)?
+    private var foregroundChangeCallback: (@Sendable (TVForeground) -> Void)?
+    private var logCallback: ((String, String, [String: String]) -> Void)?
+
+    /// History of raw SSAP requests
+    private(set) var requestCalls: [(uri: String, payload: [String: Any]?)] = []
+
+    /// Replies for raw requests, keyed by URI. Missing URIs get an empty successful reply.
+    var requestReplies: [String: Result<SSAPReply, Error>] = [:]
+
+    /// Foreground to report when the controller asks what is in front.
+    var foregroundOnQuery: TVForeground?
+
+    /// Commands the TV rejects, keyed by kind.
+    enum CommandKind: Hashable { case screenOn, setDeviceInfo }
+    var commandErrors: [CommandKind: Error] = [:]
+
+    /// Runs after a command is recorded, before it returns. For interleaving TV updates.
+    var onSendCommand: ((WebOSCommand) -> Void)?
     
     // MARK: - WebOSClientProtocol Implementation
     
@@ -121,6 +139,43 @@ final class MockWebOSClient: WebOSClientProtocol {
         if asyncDelay > 0 {
             try await Task.sleep(for: .seconds(asyncDelay))
         }
+
+        onSendCommand?(command)
+        if case .screenOn = command, let error = commandErrors[.screenOn] {
+            throw error
+        }
+        if case .setDeviceInfo = command, let error = commandErrors[.setDeviceInfo] {
+            throw error
+        }
+
+        if case .getCurrentForegroundAppInfo = command, let foregroundOnQuery {
+            foregroundChangeCallback?(foregroundOnQuery)
+        }
+    }
+
+    func request(uri: String, payload: [String: Any]?) async throws -> SSAPReply {
+        requestCalls.append((uri: uri, payload: payload))
+        if let result = requestReplies[uri] {
+            return try result.get()
+        }
+        if shouldThrowOnSendCommand {
+            transitionToErrorIfNeeded(errorToThrow)
+            throw errorToThrow
+        }
+        return SSAPReply()
+    }
+
+    func setForegroundChangeCallback(_ callback: @escaping @Sendable (TVForeground) -> Void) {
+        self.foregroundChangeCallback = callback
+    }
+
+    func setLogCallback(_ callback: @escaping (String, String, [String: String]) -> Void) {
+        self.logCallback = callback
+    }
+
+    /// Simulate the TV bringing an app or input to the front.
+    func simulateForegroundChange(_ foreground: TVForeground) {
+        foregroundChangeCallback?(foreground)
     }
 
     func getPowerStatus() async throws -> TVPowerStatus {
@@ -186,6 +241,11 @@ final class MockWebOSClient: WebOSClientProtocol {
         disconnectCalls.removeAll()
         sendCommandCalls.removeAll()
         getPowerStatusCalls.removeAll()
+        requestCalls.removeAll()
+        requestReplies.removeAll()
+        foregroundOnQuery = nil
+        commandErrors.removeAll()
+        onSendCommand = nil
         
         shouldThrowOnConnect = false
         shouldThrowOnSendCommand = false

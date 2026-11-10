@@ -12,6 +12,7 @@ public protocol PowerManagerProtocol: Sendable {
     var onScreenSleep: (@MainActor @Sendable () -> Void)? { get set }
     var onScreenWake: (@MainActor @Sendable () -> Void)? { get set }
     var onScreenUnlock: (@MainActor @Sendable () -> Void)? { get set }
+    var onScreenLock: (@MainActor @Sendable () -> Void)? { get set }
     func preventSleep() async throws
     func allowSleep() async throws
     func isSystemSleeping() async -> Bool
@@ -49,6 +50,9 @@ final class PowerManager: PowerManagerProtocol {
 
     /// Callback when the locked screen is unlocked
     var onScreenUnlock: (@MainActor @Sendable () -> Void)?
+
+    /// Callback when the screen is locked
+    var onScreenLock: (@MainActor @Sendable () -> Void)?
     
     /// Storage for workspace notification observers
     private var workspaceNotificationObservers: [NSObjectProtocol] = []
@@ -227,6 +231,18 @@ final class PowerManager: PowerManagerProtocol {
             }
         }
         workspaceNotificationObservers.append(screenUnlockObserver)
+
+        let screenLockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.screenIsLocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.logger.info("\("Screen did lock", privacy: .public)")
+                self?.onScreenLock?()
+            }
+        }
+        workspaceNotificationObservers.append(screenLockObserver)
         
         logger.info("Sleep/wake event monitoring started (observing \(self.workspaceNotificationObservers.count, privacy: .public) notifications)")
     }

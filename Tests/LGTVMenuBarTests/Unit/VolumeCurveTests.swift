@@ -2,20 +2,6 @@ import Foundation
 import Testing
 @testable import LGTVMenuBar
 
-/// Volume curve conversion functions for testing
-/// These mirror the private functions in VolumeSection
-enum VolumeCurve {
-    /// Convert slider position (0-1) to volume (0-100) with power curve (exponent 2.0)
-    static func sliderToVolume(_ position: Double) -> Int {
-        Int((pow(position, 2.0) * 100).rounded())
-    }
-    
-    /// Convert volume (0-100) to slider position (0-1) - inverse (sqrt)
-    static func volumeToSlider(_ volume: Int) -> Double {
-        pow(Double(volume) / 100.0, 0.5)
-    }
-}
-
 @Suite("Volume Curve Tests")
 struct VolumeCurveTests {
     
