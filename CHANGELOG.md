@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 2.0.0 - Unreleased
+## 2.0.0 - 2026-11-10
 
 ### Added
 - Display Lock: hold the Mac's resolution, refresh rate and HDR, and optionally the TV's PC input label and picture mode, while the TV shows the Mac's input. It does nothing on any other input or TV app, and pauses itself rather than loop if a setting will not stay set.
