@@ -26,6 +26,16 @@ first, and export the log if anything misbehaves.
   The TV's `offrsLastTime` read 6037 while panel hours read 6140, so the two are not on the same
   clock; nothing is derived from the former.
 - The TV's Telnet shell refuses connections for a short while after it powers on.
+- Lock-triggered refresh (2026-11-11): locked with a refresh due, the app switched the TV off a
+  minute later. The shell kept answering for about six minutes with the count unchanged, then
+  stopped; on the next connect the count had gone from 425 to 426 and nothing was due.
+- Display-sleep lock detection: "Mac downtime began" with reason `displaySlept` and
+  `isMacLocked` true was logged with no lock notification.
+- Standby with the session held: after the Mac's display slept the TV went into standby by
+  itself, the WebSocket session stayed connected for half an hour, and the TV reported
+  `Active Standby`. That is ordinary standby on this TV, not a refresh.
+- Refresh clocks: two refreshes 10 panel hours apart (6136, 6146) were reported by
+  `offrsLastTime` as 8 apart (6037, 6045). `offrsInterval` is 4 and `jbInterval` is 500.
 - macOS posts `com.apple.screenIsLocked` for a manual lock but not when the lock comes from the
   display going to sleep.
 - The TV occasionally leaves one `getVolume` unanswered on a healthy connection.
@@ -65,3 +75,7 @@ first, and export the log if anything misbehaves.
    input and change them again (nothing should be put back).
 8. With a pixel refresh due and the option on, lock the Mac and leave it for ten minutes; the
    refresh should complete. Repeat, but unlock after two minutes: the TV comes straight back.
+9. Let the Mac's display sleep until the TV turns itself off, then wake and unlock the Mac: the
+   TV should be sent a wake ("Wake-on-LAN attempt"), not left in standby.
+10. Set Panel Care to "Only during set hours" with hours that exclude now, and lock the Mac with
+   a refresh due: "Downtime decision" should say `outside the set hours` and the TV stays on.

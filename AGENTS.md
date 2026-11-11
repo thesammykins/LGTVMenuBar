@@ -65,7 +65,10 @@ test, wait on a condition by polling a bounded number of times, not against a wa
 9. **A pixel refresh never takes the display from someone using the Mac.** The TV is only
    switched off for one while the Mac is locked or asleep; there is no manual trigger. While
    `pixelRefreshStartedAt` is set, nothing reconnects and unattended wakes wait
-   (`PanelCarePolicy`). Unlocking, opening the menu or recent input always wins.
+   (`PanelCarePolicy`). Unlocking, opening the menu or recent input always wins. Set hours
+   (`PanelCareSchedule`) may only narrow this, never trigger a refresh by themselves.
+   `Active Standby` does not mean a refresh is running: a TV that keeps its network up reports
+   it for ordinary standby too, and a session can stay connected through either.
 10. **Log decisions.** Every automation decision records its inputs through `logDiagnostic`; that
    log is how problems on real hardware get diagnosed.
 

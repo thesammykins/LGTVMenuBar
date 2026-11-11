@@ -106,6 +106,46 @@ struct TVControllerAutomationGuardTests {
         #expect(count(harness.webOS, isSetInput) == 1)
     }
 
+    /// Seen on an LG C2: the TV went into standby while the Mac's display slept, the session
+    /// stayed connected, and the Mac's wake was skipped as a possible pixel refresh.
+    @Test("a TV that went into standby during a held session is woken when someone returns")
+    func standbyTVWithLiveSessionIsWokenForUser() async throws {
+        let harness = try makeHarness(reachable: true, config: config())
+        try await harness.controller.connect()
+        harness.webOS.powerStatusResults = [
+            .success(TVPowerStatus(state: "Active Standby")),
+            .success(TVPowerStatus(state: "Active"))
+        ]
+
+        await harness.controller.ensureTVAwake(reason: "screenUnlock")
+
+        #expect(harness.wol.wakeCalls.count == 1)
+    }
+
+    @Test("a TV still off after a wake is sent one more, and no more than that")
+    func wakeIsRepeatedOnceForATVStillOff() async throws {
+        let harness = try makeHarness(reachable: true, config: config())
+        harness.webOS.mockPowerStatus = TVPowerStatus(state: "Active Standby")
+
+        await harness.controller.ensureTVAwake(reason: "screenUnlock")
+
+        #expect(harness.wol.wakeCalls.count == 2)
+    }
+
+    @Test("a TV caught switching off is woken for someone at the Mac")
+    func turningOffTVIsWokenForUser() async throws {
+        let harness = try makeHarness(reachable: true, config: config())
+        try await harness.controller.connect()
+        harness.webOS.powerStatusResults = [
+            .success(TVPowerStatus(state: "Active", processing: "Request Suspend")),
+            .success(TVPowerStatus(state: "Active"))
+        ]
+
+        await harness.controller.ensureTVAwake(reason: "screenUnlock")
+
+        #expect(harness.wol.wakeCalls.count == 1)
+    }
+
     @Test("a screen-on the TV declines does not stop the input switch after a wake")
     func declinedScreenOnStillRunsPostWakeActions() async throws {
         let harness = try makeHarness(reachable: false, config: config())

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.1.0 - 2026-11-11
+
+### Added
+- Panel Care now shows when the last pixel refresh ran, how many hours the TV has been used since, and roughly how much more use there is before the TV asks for the next one, alongside the TV's own schedule (a short refresh after every 4 hours of use on a C2). The app times the last refresh from when it first sees the TV's count go up, so these appear after the next refresh.
+- Set hours for pixel refreshes: limit switching the TV off for a due refresh to part of the day, such as overnight. A Mac that is already locked when the hours begin is handled then. It still never happens while the Mac is in use.
+
+### Fixed
+- The TV was not turned back on when the Mac woke if it had gone into standby while the app was still connected to it. That state was taken for a pixel refresh in progress and left alone. Someone returning to the Mac now always gets the display back; only a wake with nobody there leaves a TV in standby untouched.
+- A TV switched off for a pixel refresh was not brought back on unlock when "wake with Mac" was off. It always is now, since the app switched it off.
+- Unlocking in the instant the TV was being switched off for a refresh could leave it off. The lock is checked again afterwards and the TV is woken.
+- A TV caught part-way through switching off, or still off after a wake, was given up on. It is now sent a wake, and one more if the first is lost.
+- A TV left in standby because nobody was at the Mac is woken as soon as someone is, without needing an unlock.
+- Forgetting the TV now also forgets its pixel-refresh record.
+- The diagnostic log could say the TV "did not run a pixel refresh" half a minute after it was switched off, while the refresh was still running. The outcome is now judged once the quiet period is over.
+
 ## 2.0.1 - 2026-11-11
 
 ### Fixed

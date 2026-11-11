@@ -192,8 +192,8 @@ struct TVControllerWakeTests {
         #expect(!mockWebOS.sendCommandCalls.contains { if case .screenOn = $0.command { return true }; return false })
     }
 
-    @Test("pixel refresher power state is not interrupted")
-    func pixelRefresherPowerStateIsNotInterrupted() async throws {
+    @Test("standby is not interrupted by a wake with nobody at the Mac")
+    func standbyIsNotInterruptedWhenNobodyIsThere() async throws {
         let mockPowerManager = MockPowerManager()
         let mockWebOS = MockWebOSClient()
         let mockWOL = MockWOLService()
@@ -210,6 +210,7 @@ struct TVControllerWakeTests {
             mediaKeyManager: mockMediaKey,
             launchAtLoginManager: mockLaunch,
             diagnosticLogger: mockDiagnostic,
+            userIdleSeconds: { 3_600 },
             wakeConnectInitialDelay: .milliseconds(10),
             wakeConnectRetryDelay: .milliseconds(10),
             wakeConnectMaxAttempts: 3

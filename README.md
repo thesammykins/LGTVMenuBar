@@ -104,7 +104,7 @@ Everything else is in Settings, opened from the menu or with Command-comma:
 - **TV**: addresses, which input the Mac is plugged into, connection status.
 - **Automation**: power and input behaviour, Wake-on-LAN options.
 - **Display**: Display Lock.
-- **Panel Care**: pixel refresh status and scheduling (rooted TVs).
+- **Panel Care**: when the last pixel refresh ran, use since then, when the next is due, and making room for it while the Mac is locked or asleep, optionally only during set hours (rooted TVs).
 - **General**: open at login, volume keys, updates.
 - **Advanced**: rooted TV access and the diagnostic log.
 

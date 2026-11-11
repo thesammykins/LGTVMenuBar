@@ -14,18 +14,31 @@ public struct PanelCareStatus: Equatable, Sendable {
     public var longRefreshCount: Int
     /// The TV's own verdict that a refresh should run at the next opportunity.
     public var isRefreshDue: Bool
+    /// Hours of use after which the TV asks for a short refresh, as the TV reports it.
+    public var refreshIntervalHours: Int?
+    /// Hours of use between long cleanings, as the TV reports it.
+    public var longRefreshIntervalHours: Int?
 
-    public init(panelHours: Int, refreshCount: Int, longRefreshCount: Int, isRefreshDue: Bool) {
+    public init(
+        panelHours: Int,
+        refreshCount: Int,
+        longRefreshCount: Int,
+        isRefreshDue: Bool,
+        refreshIntervalHours: Int? = nil,
+        longRefreshIntervalHours: Int? = nil
+    ) {
         self.panelHours = panelHours
         self.refreshCount = refreshCount
         self.longRefreshCount = longRefreshCount
         self.isRefreshDue = isRefreshDue
+        self.refreshIntervalHours = refreshIntervalHours
+        self.longRefreshIntervalHours = longRefreshIntervalHours
     }
 
     // The TV also reports `offrsLastTime` and `jbLastTime`. They are not on the same clock as the
-    // panel hours (after a refresh at 6,136 panel hours the TV reported 6,037), so no "hours
-    // since the last refresh" is derived from them. Whether a refresh is due comes only from the
-    // TV's own flag.
+    // panel hours (two refreshes 10 panel hours apart were reported 8 apart, about 100 behind),
+    // so nothing is derived from them. Use since the last refresh comes from `PanelCareHistory`,
+    // and whether a refresh is due comes only from the TV's own flag.
 
     /// Shell command that prints the three panel-care replies as `key=json` lines.
     static let queryCommand = [
@@ -58,7 +71,9 @@ public struct PanelCareStatus: Equatable, Sendable {
             panelHours: panelHours,
             refreshCount: info["offrsCount"] as? Int ?? 0,
             longRefreshCount: info["jbCount"] as? Int ?? 0,
-            isRefreshDue: isDue
+            isRefreshDue: isDue,
+            refreshIntervalHours: (info["offrsInterval"] as? Int).flatMap { $0 > 0 ? $0 : nil },
+            longRefreshIntervalHours: (info["jbInterval"] as? Int).flatMap { $0 > 0 ? $0 : nil }
         )
     }
 }

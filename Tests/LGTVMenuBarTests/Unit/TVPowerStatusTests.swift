@@ -17,11 +17,11 @@ struct TVPowerStatusTests {
         #expect(status.normalizedState == .screenOff)
     }
 
-    @Test("active standby normalizes to pixel refresher")
+    @Test("active standby is its own state")
     func activeStandbyNormalizesToPixelRefresher() {
         let status = TVPowerStatus(state: "Active Standby")
 
-        #expect(status.normalizedState == .pixelRefresher)
+        #expect(status.normalizedState == .activeStandby)
     }
 
     @Test("request suspend normalizes to turningOff")

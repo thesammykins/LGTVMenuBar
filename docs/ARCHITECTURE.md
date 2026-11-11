@@ -71,12 +71,15 @@ wake:
   connected -> read power state
        on and showing a picture -> stop: no wake, no input switch
        screen off               -> screen on, post-wake actions
-       standby, session predates the trigger -> stop (pixel refresher may be running)
+       standby, session predates the trigger, nobody at the Mac -> stop (a pixel refresh may be
+           running), and watch for input: someone arriving wakes it
+       turning off, nobody at the Mac -> stop
        standby or off otherwise -> continue
   governor(.powerOn) refused -> stop
   drop the connection, send Wake-on-LAN
   reconnect until connected or timeout (default 90 s)
   read power state, screen on if needed
+       still off (standby, turning off) -> one more wake round, then stop
   post-wake actions (PowerPolicy.postWakeActions): input switch, PC label
 ```
 
@@ -103,12 +106,23 @@ the TV's flag; its last-refresh figures are on a different clock from the panel 
 used. The state is read again after each connect, with retries, because the TV's shell is not up
 the moment it powers on.
 
+"Use since the last refresh" is the app's own measurement. `PanelCareHistory` notes the panel
+hours and the time when the refresh count is first seen to go up, and is kept in UserDefaults
+through `PanelCareHistoryStoring`. Until the app has seen one refresh it shows nothing rather
+than guess. The "next refresh" estimate is the TV's reported interval (`offrsInterval`, 4 hours
+on a C2) less that use; the TV's flag overrides it either way.
+
+`PanelCareSchedule` can limit switching the TV off to hours of the day. It only narrows the
+locked-or-asleep rule. A Mac locked before the hours begin is looked at again when they do
+(`waitForAllowedHours`); unlocking or waking cancels that.
+
 ```
 screen locked, or display slept (option on); never while the Mac is unlocked
   -> grace delay (60 s; unlock or wake cancels)
   -> read panel-care state and foreground
-  -> PanelCarePolicy.powerOffDecision: locked (macOS is asked directly), due, connected,
-     Mac's input in front?
+  -> PanelCarePolicy.powerOffDecision: locked (macOS is asked directly), inside the set
+     hours, due, connected, Mac's input in front?
+     outside the set hours -> wait for them to begin, then decide again
   -> governor(.powerOff) -> power off -> quiet period begins
 
 quiet period (pixelRefreshStartedAt set, at most 10 min)

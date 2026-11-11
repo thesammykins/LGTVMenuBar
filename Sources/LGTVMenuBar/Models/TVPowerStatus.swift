@@ -8,7 +8,9 @@ public struct TVPowerStatus: Equatable, Sendable {
         case screenOnInProgress
         case off
         case turningOff
-        case pixelRefresher
+        /// Off to the viewer but still answering. Reported both while the pixel refresher runs
+        /// and as the ordinary standby of a TV that keeps its network up; the two look the same.
+        case activeStandby
         case screenSaver
         case unknown
     }
@@ -40,7 +42,7 @@ public struct TVPowerStatus: Equatable, Sendable {
         }
 
         if normalizedState == "active standby" {
-            return .pixelRefresher
+            return .activeStandby
         }
 
         if normalizedState == "screen saver" {

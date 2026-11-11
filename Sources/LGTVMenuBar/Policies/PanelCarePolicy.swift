@@ -17,10 +17,12 @@ public enum PanelCarePolicy {
     /// Whether to switch the TV off so a due refresh can run.
     ///
     /// Only ever while the Mac is locked (or asleep, which the sleep path handles): a refresh
-    /// must never take the display away from someone using the Mac.
+    /// must never take the display away from someone using the Mac. The set hours can only
+    /// narrow that further.
     public static func powerOffDecision(
         isEnabled: Bool,
         isMacLocked: Bool,
+        isWithinAllowedHours: Bool,
         status: PanelCareStatus?,
         isConnected: Bool,
         foreground: TVForeground,
@@ -28,6 +30,7 @@ public enum PanelCarePolicy {
     ) -> PowerOffDecision {
         guard isEnabled else { return .leaveOn(reason: "panel care is off") }
         guard isMacLocked else { return .leaveOn(reason: "the Mac is not locked") }
+        guard isWithinAllowedHours else { return .leaveOn(reason: "outside the set hours") }
         guard isConnected else { return .leaveOn(reason: "not connected to the TV") }
         guard let status else { return .leaveOn(reason: "panel-care state is not available") }
         guard status.isRefreshDue else { return .leaveOn(reason: "no refresh is due") }

@@ -24,6 +24,8 @@ public struct TVConfiguration: Codable, Identifiable, Sendable, Equatable {
     /// Switch the TV off for a due pixel refresh while the Mac is locked or its display sleeps,
     /// and let that refresh finish. Needs root access to know when a refresh is due.
     public var refreshPixelsDuringDowntime: Bool
+    /// Hours of the day that the above is limited to, if any.
+    public var panelCareSchedule: PanelCareSchedule
 
     public init(
         id: UUID = UUID(),
@@ -42,7 +44,8 @@ public struct TVConfiguration: Codable, Identifiable, Sendable, Equatable {
         wakeOnMenuOpen: Bool = true,
         rootAccess: RootAccessSettings = RootAccessSettings(),
         displayLock: DisplayLockProfile = DisplayLockProfile(),
-        refreshPixelsDuringDowntime: Bool = false
+        refreshPixelsDuringDowntime: Bool = false,
+        panelCareSchedule: PanelCareSchedule = PanelCareSchedule()
     ) {
         self.id = id
         self.name = name
@@ -61,6 +64,7 @@ public struct TVConfiguration: Codable, Identifiable, Sendable, Equatable {
         self.rootAccess = rootAccess
         self.displayLock = displayLock
         self.refreshPixelsDuringDowntime = refreshPixelsDuringDowntime
+        self.panelCareSchedule = panelCareSchedule
     }
 
     // Decoding is written out so configurations saved by older releases, which lack the newer
@@ -84,5 +88,6 @@ public struct TVConfiguration: Codable, Identifiable, Sendable, Equatable {
         rootAccess = try container.decodeIfPresent(RootAccessSettings.self, forKey: .rootAccess) ?? RootAccessSettings()
         displayLock = try container.decodeIfPresent(DisplayLockProfile.self, forKey: .displayLock) ?? DisplayLockProfile()
         refreshPixelsDuringDowntime = try container.decodeIfPresent(Bool.self, forKey: .refreshPixelsDuringDowntime) ?? false
+        panelCareSchedule = try container.decodeIfPresent(PanelCareSchedule.self, forKey: .panelCareSchedule) ?? PanelCareSchedule()
     }
 }
