@@ -19,6 +19,10 @@
   resolve the certificate by SHA-1 hash before calling `codesign`.
 - `xcrun stapler validate` is the reliable local notarization check. `spctl` can report
   `source=Insufficient Context` on a freshly stapled DMG that is in fact fine.
+- The app supports macOS 15 but is built with a newer toolchain, so Swift back-deployment
+  libraries (`libswiftCompatibilitySpan.dylib`) are copied into `Contents/Frameworks` and signed.
+  The script fails if anything linked by `@rpath` is missing from the bundle. A build that
+  launches on the build Mac proves nothing about macOS 15: 2.0.0 to 2.1.0 crashed there in dyld.
 - The DMG places `LGTVMenuBar.app` on the left target and the Applications link on the right;
   preview the mounted DMG after changing `scripts/build-dmg.sh` or `scripts/assets/dmg-background.png`.
 

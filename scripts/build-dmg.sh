@@ -268,6 +268,59 @@ sign_embedded_frameworks() {
         log_info "Signing embedded framework: $(basename "${framework}")"
         codesign --force --deep "${signing_args[@]}" "${framework}"
     done
+
+    local library
+    for library in "${APP_FRAMEWORKS_DIR}"/*.dylib; do
+        [[ -e "${library}" ]] || continue
+        log_info "Signing embedded library: $(basename "${library}")"
+        codesign --force "${signing_args[@]}" "${library}"
+    done
+}
+
+# Swift back-deployment libraries (libswiftCompatibilitySpan and the like) are linked by
+# @rpath. A macOS new enough has them in /usr/lib/swift, which is first on the rpath; an
+# older one does not, and the app dies in dyld at launch unless its own copy is in the bundle.
+embed_swift_compatibility_libraries() {
+    local binary_path="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+    local toolchain_lib
+    toolchain_lib="$(cd "$(dirname "$(xcrun --find swiftc)")/../lib" && pwd)"
+
+    local linked
+    linked="$(otool -L "${binary_path}")"
+
+    local name source
+    while read -r name; do
+        [[ -n "${name}" ]] || continue
+        source="$(find "${toolchain_lib}" -path "*/macosx/${name}" -print -quit)"
+        if [[ -z "${source}" ]]; then
+            log_error "${name} is linked by the app but was not found under ${toolchain_lib}"
+            exit 1
+        fi
+        log_info "Embedding ${name}..."
+        mkdir -p "${APP_FRAMEWORKS_DIR}"
+        cp "${source}" "${APP_FRAMEWORKS_DIR}/${name}"
+    done < <(grep -o '@rpath/libswift[A-Za-z0-9_]*\.dylib' <<<"${linked}" | sed 's|@rpath/||' | sort -u)
+}
+
+# Everything the app links by @rpath has to be inside the bundle, or it only launches on a
+# Mac that happens to have the library somewhere else.
+verify_bundled_dependencies() {
+    local binary_path="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+    local linked
+    linked="$(otool -L "${binary_path}")"
+
+    local dependency missing=false
+    while read -r dependency; do
+        [[ -n "${dependency}" ]] || continue
+        if [[ ! -e "${APP_FRAMEWORKS_DIR}/${dependency#@rpath/}" ]]; then
+            log_error "Not in the app bundle: ${dependency}"
+            missing=true
+        fi
+    done < <(grep -o '@rpath/[^ ]*' <<<"${linked}")
+
+    if [[ "${missing}" == true ]]; then
+        exit 1
+    fi
 }
 
 copy_embedded_frameworks() {
@@ -593,7 +646,9 @@ fi
 echo -n "APPL????" > "${APP_BUNDLE}/Contents/PkgInfo"
 
 copy_embedded_frameworks
+embed_swift_compatibility_libraries
 ensure_framework_rpath
+verify_bundled_dependencies
 
 log_success "App bundle created at ${APP_BUNDLE}"
 
