@@ -714,7 +714,19 @@ hdiutil attach "${DMG_RW_PATH}" \
     -mountpoint "${DMG_MOUNT}" \
     -quiet
 
-apply_dmg_finder_layout
+# Finder does not always know about a volume the moment it is mounted, and then cannot find
+# the background file. A short wait fixes it, so the layout is tried a few times.
+layout_attempt=1
+until apply_dmg_finder_layout; do
+    if (( layout_attempt >= 5 )); then
+        log_error "Finder could not lay out the DMG window after ${layout_attempt} attempts."
+        detach_dmg_mount
+        exit 1
+    fi
+    log_info "Finder was not ready for the DMG volume; trying again..."
+    layout_attempt=$((layout_attempt + 1))
+    sleep 3
+done
 if ! bless --folder "${DMG_MOUNT}" --openfolder "${DMG_MOUNT}" 2>/dev/null; then
     log_info "Skipping DMG auto-open metadata; this macOS host does not support bless --openfolder."
 fi
