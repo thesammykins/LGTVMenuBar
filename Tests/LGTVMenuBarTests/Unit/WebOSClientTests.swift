@@ -179,6 +179,20 @@ struct WebOSClientTests {
         #expect(recorder.isMuted == true)
     }
 
+    @Test("a power-state update is reported, and an unrelated state key is not")
+    func powerStateUpdatesAreReported() async {
+        let client = WebOSClient(keychainManager: MockKeychainManager())
+        let recorder = WebOSPayloadRecorder()
+        client.setPowerStateChangeCallback { status in
+            recorder.powerStates.append(status.normalizedState)
+        }
+
+        await client.handleMessageForTesting(#"{"type":"response","payload":{"returnValue":true,"state":"Active Standby"}}"#)
+        await client.handleMessageForTesting(#"{"type":"response","payload":{"returnValue":true,"state":"playing"}}"#)
+
+        #expect(recorder.powerStates == [.activeStandby])
+    }
+
     @Test("response payload handles nested sound output")
     func responsePayloadHandlesNestedSoundOutput() async {
         let client = WebOSClient(keychainManager: MockKeychainManager())
@@ -209,4 +223,5 @@ private final class WebOSPayloadRecorder: @unchecked Sendable {
     var volume: Int?
     var isMuted: Bool?
     var soundOutput: TVSoundOutput?
+    var powerStates: [TVPowerStatus.NormalizedState] = []
 }

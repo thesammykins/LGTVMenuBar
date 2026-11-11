@@ -77,5 +77,9 @@ first, and export the log if anything misbehaves.
    refresh should complete. Repeat, but unlock after two minutes: the TV comes straight back.
 9. Let the Mac's display sleep until the TV turns itself off, then wake and unlock the Mac: the
    TV should be sent a wake ("Wake-on-LAN attempt"), not left in standby.
-10. Set Panel Care to "Only during set hours" with hours that exclude now, and lock the Mac with
+10. While connected, turn the TV off with its remote. Within a few seconds the log should show
+   "TV went into standby - releasing the connection" and the menu should offer Turn On. This
+   depends on the TV pushing power-state changes over `ssap://com.webos.service.tvpower/power/getPowerState`,
+   which has not been seen on hardware yet.
+11. Set Panel Care to "Only during set hours" with hours that exclude now, and lock the Mac with
    a refresh due: "Downtime decision" should say `outside the set hours` and the TV stays on.

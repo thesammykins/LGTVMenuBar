@@ -60,6 +60,11 @@ The backoff position survives a connection that drops within a minute, so a TV t
 immediately drops is not retried every two seconds. A TV that turns out to be in standby is
 released and looked at again after five minutes.
 
+The same release happens on a live session. The client subscribes to the TV's power state
+(`subscribePowerState`), and `handlePowerStateChange` drops the connection when the TV reports
+standby, because a TV that keeps its network up would otherwise hold the session open and look
+connected while off. A wake in progress is left to finish first.
+
 ### Wake recovery (`TVController.ensureTVAwake`)
 
 ```

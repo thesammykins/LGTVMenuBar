@@ -122,6 +122,36 @@ struct TVControllerAutomationGuardTests {
         #expect(harness.wol.wakeCalls.count == 1)
     }
 
+    /// Seen on an LG C2: the TV turned itself off while the session stayed open, and the menu
+    /// went on showing it as connected and on HDMI 1.
+    @Test("a TV that reports standby is let go, and woken when someone returns")
+    func standbyReportReleasesTheConnection() async throws {
+        let harness = try makeHarness(reachable: true, config: config())
+        try await harness.controller.connect()
+
+        harness.webOS.simulatePowerStateChange(TVPowerStatus(state: "Screen Off"))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(harness.controller.connectionState.isConnected)
+
+        harness.webOS.simulatePowerStateChange(TVPowerStatus(state: "Active Standby"))
+        var polls = 0
+        while harness.controller.connectionState.isConnected && polls < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            polls += 1
+        }
+        #expect(!harness.controller.connectionState.isConnected)
+        #expect(harness.wol.wakeCalls.isEmpty)
+        #expect(count(harness.webOS, isPowerOff) == 0)
+
+        harness.webOS.powerStatusResults = [
+            .success(TVPowerStatus(state: "Active Standby")),
+            .success(TVPowerStatus(state: "Active"))
+        ]
+        await harness.controller.ensureTVAwake(reason: "screenUnlock")
+        #expect(harness.wol.wakeCalls.count == 1)
+        #expect(harness.controller.connectionState.isConnected)
+    }
+
     @Test("a TV still off after a wake is sent one more, and no more than that")
     func wakeIsRepeatedOnceForATVStillOff() async throws {
         let harness = try makeHarness(reachable: true, config: config())

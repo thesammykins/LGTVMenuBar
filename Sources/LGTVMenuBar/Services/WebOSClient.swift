@@ -18,6 +18,8 @@ public protocol WebOSClientProtocol {
     func setVolumeChangeCallback(_ callback: @escaping @Sendable (Int, Bool) -> Void)
     func setInputListCallback(_ callback: @escaping @Sendable ([String: String]) -> Void)
     func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void)
+    /// Receives the TV's power state whenever it reports one: on request, and as it changes.
+    func setPowerStateChangeCallback(_ callback: @escaping @Sendable (TVPowerStatus) -> Void)
     func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void)
     /// Receives (level, message, metadata) for every connection lifecycle event.
     func setLogCallback(_ callback: @escaping (String, String, [String: String]) -> Void)
@@ -98,6 +100,7 @@ final class WebOSClient: WebOSClientProtocol {
     private var volumeChangeCallback: (@Sendable (Int, Bool) -> Void)?
     private var inputListCallback: (@Sendable ([String: String]) -> Void)?
     private var soundOutputChangeCallback: (@Sendable (TVSoundOutput) -> Void)?
+    private var powerStateChangeCallback: (@Sendable (TVPowerStatus) -> Void)?
     private var diagnosticPayloadCallback: ((String, String) -> Void)?
     private var logCallback: ((String, String, [String: String]) -> Void)?
 
@@ -463,6 +466,10 @@ final class WebOSClient: WebOSClientProtocol {
         self.soundOutputChangeCallback = callback
     }
 
+    func setPowerStateChangeCallback(_ callback: @escaping @Sendable (TVPowerStatus) -> Void) {
+        self.powerStateChangeCallback = callback
+    }
+
     func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void) {
         self.diagnosticPayloadCallback = callback
     }
@@ -686,6 +693,7 @@ final class WebOSClient: WebOSClientProtocol {
             .getInputList,
             .subscribeVolume,
             .subscribeSoundOutput,
+            .subscribePowerState,
             .getSoundOutput,
             .getSystemInfo
         ]
@@ -867,6 +875,13 @@ final class WebOSClient: WebOSClientProtocol {
             soundOutputChangeCallback?(TVSoundOutput.fromAPIValue(soundOutputStr))
         }
 
+        // Only a state the power service is known to report counts, so another reply that
+        // happens to carry a "state" key is not mistaken for one.
+        let power = TVPowerStatus(payload: payload)
+        if power.normalizedState != .unknown {
+            powerStateChangeCallback?(power)
+        }
+
         // ssap://system/getSystemInfo
         if let displayModel = payload["modelName"] as? String {
             capabilities.displayModel = displayModel
@@ -998,6 +1013,8 @@ final class WebOSClient: WebOSClientProtocol {
             return subscribe("ssap://audio/getVolume")
         case .getPowerState:
             return request("ssap://com.webos.service.tvpower/power/getPowerState")
+        case .subscribePowerState:
+            return subscribe("ssap://com.webos.service.tvpower/power/getPowerState")
         case .mute:
             return request("ssap://audio/setMute", ["mute": true])
         case .unmute:

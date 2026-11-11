@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.1.1 - 2026-11-11
+
+### Fixed
+- A TV that went into standby while the app was connected kept showing as connected, on its input, with working-looking controls. The app now follows the TV's power state and lets the connection go when the TV reports standby, so the menu offers Turn On and Display Lock stops judging a picture nobody sees.
+
 ## 2.1.0 - 2026-11-11
 
 ### Added

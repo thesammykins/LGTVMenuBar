@@ -58,6 +58,7 @@ final class MockWebOSClient: WebOSClientProtocol {
     private var volumeChangeCallback: (@Sendable (Int, Bool) -> Void)?
     private var inputListCallback: (@Sendable ([String: String]) -> Void)?
     private var soundOutputChangeCallback: (@Sendable (TVSoundOutput) -> Void)?
+    private var powerStateChangeCallback: (@Sendable (TVPowerStatus) -> Void)?
     private var diagnosticPayloadCallback: ((String, String) -> Void)?
     private var foregroundChangeCallback: (@Sendable (TVForeground) -> Void)?
     private var logCallback: ((String, String, [String: String]) -> Void)?
@@ -227,6 +228,14 @@ final class MockWebOSClient: WebOSClientProtocol {
     
     func setSoundOutputChangeCallback(_ callback: @escaping @Sendable (TVSoundOutput) -> Void) {
         self.soundOutputChangeCallback = callback
+    }
+
+    func setPowerStateChangeCallback(_ callback: @escaping @Sendable (TVPowerStatus) -> Void) {
+        self.powerStateChangeCallback = callback
+    }
+
+    func simulatePowerStateChange(_ status: TVPowerStatus) {
+        powerStateChangeCallback?(status)
     }
 
     func setDiagnosticPayloadCallback(_ callback: @escaping (String, String) -> Void) {

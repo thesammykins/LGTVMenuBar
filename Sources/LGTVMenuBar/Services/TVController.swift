@@ -232,6 +232,8 @@ public final class TVController: TVControllerProtocol {
     /// Set when this app switched the TV off for a refresh at a lock, until a wake undoes it.
     private var tvIsOffForPixelRefresh = false
     private var presenceWatchTask: Task<Void, Never>?
+    /// The last power state the TV reported on this session was standby.
+    private var tvReportedStandby = false
     /// How many times a wake is sent to a TV that is still off after the first.
     private static let wakeRounds = 2
 
@@ -556,6 +558,7 @@ public final class TVController: TVControllerProtocol {
     private func dropConnection() {
         connectTask?.cancel()
         connectTask = nil
+        tvReportedStandby = false
         webOSClient.disconnect()
         connectionState = .disconnected
     }
@@ -667,6 +670,7 @@ public final class TVController: TVControllerProtocol {
         userDisconnected = false
         defer {
             isWakeInProgress = false
+            releaseConnectionIfTVIsInStandby()
             ensureReconnectSupervision()
         }
 
@@ -1554,6 +1558,12 @@ public final class TVController: TVControllerProtocol {
             }
         }
         
+        webOSClient.setPowerStateChangeCallback { [weak self] status in
+            Task { @MainActor [weak self] in
+                self?.handlePowerStateChange(status)
+            }
+        }
+
         // WebOS sound output changes
         webOSClient.setSoundOutputChangeCallback { [weak self] output in
             Task { @MainActor [weak self] in
@@ -1940,6 +1950,8 @@ public final class TVController: TVControllerProtocol {
             }
             return
         }
+        // Whatever the last session's TV reported says nothing about the next one.
+        tvReportedStandby = false
         if connectionState.isTransitioning { return }
         ensureReconnectSupervision()
     }
@@ -2002,6 +2014,28 @@ public final class TVController: TVControllerProtocol {
         }
     }
 
+    private func handlePowerStateChange(_ status: TVPowerStatus) {
+        guard connectionState.isConnected else { return }
+        let isInStandby = status.normalizedState == .activeStandby || status.normalizedState == .off
+        if isInStandby != tvReportedStandby {
+            logDiagnostic(level: "info", category: "TVController", message: "TV power state changed", metadata: status.diagnosticMetadata)
+        }
+        tvReportedStandby = isInStandby
+        releaseConnectionIfTVIsInStandby()
+    }
+
+    /// A TV in standby with its network up keeps its session open. Holding it would show the
+    /// app as connected to a TV that is off, and keep Display Lock judging a picture nobody
+    /// sees, so the session is let go and looked for again later, at a pace that cannot keep
+    /// the TV from sleeping. A wake in progress is left to finish: the TV reports standby for
+    /// a moment on its way up.
+    private func releaseConnectionIfTVIsInStandby() {
+        guard tvReportedStandby, connectionState.isConnected, !isWakeInProgress else { return }
+        logDiagnostic(level: "info", category: "TVController", message: "TV went into standby - releasing the connection")
+        reconnectDelayOverride = Self.standbyRecheckDelay
+        dropConnection()
+    }
+
     /// Starts the background reconnect loop if one is needed and allowed. The loop never wakes
     /// the TV and never raises a pairing prompt more than once.
     private func ensureReconnectSupervision() {
@@ -2060,9 +2094,8 @@ public final class TVController: TVControllerProtocol {
 
                 do {
                     try await self.connectAutomatically()
-                    // A TV in standby with its network up accepts connections. Holding one
-                    // would make the app look connected to a TV that is off, so let go and
-                    // look again later, at a pace that cannot keep the TV from sleeping.
+                    // The power subscription normally reports this by itself; asking covers a
+                    // TV that does not answer it.
                     if let status = try? await self.webOSClient.getPowerStatus(),
                        status.normalizedState == .activeStandby || status.normalizedState == .off {
                         self.logDiagnostic(level: "info", category: "TVController", message: "Reconnected to a TV in standby - releasing", metadata: status.diagnosticMetadata)
