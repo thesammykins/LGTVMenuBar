@@ -66,6 +66,32 @@ struct WebOSClientFakeTVTests {
         client.disconnect()
     }
 
+    @Test("an endpoint that has worked is retried alone while the TV is not answering")
+    func provenEndpointSkipsFallback() async throws {
+        let tv = FakeTV()
+        try await tv.start()
+        defer { tv.stop() }
+        let client = makeClient(tv, endpointCount: 2)
+
+        try await client.connect(to: config) { _ in }
+        client.disconnect()
+        let registrationsWhileWorking = tv.registerCount
+
+        tv.registration = .silent
+        await #expect(throws: (any Error).self) {
+            try await client.connect(to: config) { _ in }
+        }
+        #expect(tv.registerCount == registrationsWhileWorking + 1)
+
+        // Once it has failed often enough the full list is tried again.
+        for _ in 1..<WebOSClient.provenEndpointFailureLimit {
+            try? await client.connect(to: config) { _ in }
+        }
+        let registrationsBeforeFallback = tv.registerCount
+        try? await client.connect(to: config) { _ in }
+        #expect(tv.registerCount == registrationsBeforeFallback + 2)
+    }
+
     @Test("a TV that accepts the socket but never answers fails within the handshake timeout")
     func silentTVTimesOut() async throws {
         let tv = FakeTV()

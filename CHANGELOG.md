@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.1.2 - 2026-11-12
+
+### Changed
+- Reconnecting after a wake is quicker when the TV starts from deep standby, as it does after a pixel refresh. The app now watches for the TV's control port to open and connects at that moment, instead of trying early and waiting out two timeouts; it no longer falls back to the older unencrypted port on a TV that has already answered on the secure one; and wake packets go to every network target at once rather than one target at a time.
+
 ## 2.1.1 - 2026-11-11
 
 ### Fixed

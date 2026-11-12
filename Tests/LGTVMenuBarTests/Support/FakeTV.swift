@@ -188,3 +188,23 @@ struct StubReachabilityProbe: TVReachabilityProbing {
     let reachable: Bool
     func isReachable(host: String, timeout: Duration) async -> Bool { reachable }
 }
+
+/// Reachability stub that answers from a script, then keeps giving its last answer.
+final class ScriptedReachabilityProbe: TVReachabilityProbing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var answers: [Bool]
+    private var _callCount = 0
+
+    init(answers: [Bool]) {
+        self.answers = answers
+    }
+
+    var callCount: Int { lock.withLock { _callCount } }
+
+    func isReachable(host: String, timeout: Duration) async -> Bool {
+        lock.withLock {
+            _callCount += 1
+            return answers.count > 1 ? answers.removeFirst() : answers.first ?? false
+        }
+    }
+}

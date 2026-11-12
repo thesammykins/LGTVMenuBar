@@ -78,6 +78,8 @@ struct WOLServiceTests {
             "192.168.88.255:7"
         ])
         #expect(sentTargets.count == uniqueDestinations.count * 3)
+        // Every destination is reached before any is repeated, so none waits on another's repeats.
+        #expect(Set(sentTargets.prefix(4).map { "\($0.host):\($0.port)" }) == uniqueDestinations)
     }
 
     @Test("WOLService honors explicit wake broadcast and port")

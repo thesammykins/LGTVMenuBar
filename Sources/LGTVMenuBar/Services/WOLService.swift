@@ -300,8 +300,10 @@ public final class WOLService: WOLServiceProtocol, @unchecked Sendable {
         var lastError: Error?
         var successfulSendCount = 0
 
-        for target in targets {
-            for attempt in 1...Self.sendAttemptCount {
+        // Sent by round, not by target: every target gets its first packet at once, and the time
+        // the caller waits before connecting does not grow with the number of targets.
+        for attempt in 1...Self.sendAttemptCount {
+            for target in targets {
                 do {
                     try await packetSender(packet, target)
                     successfulSendCount += 1
@@ -309,10 +311,10 @@ public final class WOLService: WOLServiceProtocol, @unchecked Sendable {
                     lastError = error
                     logger.warning("Wake-on-LAN send failed for \(target.host, privacy: .public):\(target.port, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
+            }
 
-                if attempt < Self.sendAttemptCount {
-                    try? await Task.sleep(for: Self.retryDelay)
-                }
+            if attempt < Self.sendAttemptCount {
+                try? await Task.sleep(for: Self.retryDelay)
             }
         }
 

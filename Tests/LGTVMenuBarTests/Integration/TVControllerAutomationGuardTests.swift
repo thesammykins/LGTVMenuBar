@@ -16,7 +16,12 @@ struct TVControllerAutomationGuardTests {
         let diagnostics: MockDiagnosticLogger
     }
 
-    private func makeHarness(reachable: Bool?, config: TVConfiguration) throws -> Harness {
+    private func makeHarness(
+        reachable: Bool?,
+        config: TVConfiguration,
+        probe: TVReachabilityProbing? = nil,
+        wakePortWait: Duration = .milliseconds(20)
+    ) throws -> Harness {
         let webOS = MockWebOSClient()
         let wol = MockWOLService()
         let power = MockPowerManager()
@@ -30,11 +35,12 @@ struct TVControllerAutomationGuardTests {
             mediaKeyManager: mediaKeys,
             launchAtLoginManager: MockLaunchAtLoginManager(),
             diagnosticLogger: diagnostics,
-            reachabilityProbe: reachable.map { StubReachabilityProbe(reachable: $0) },
+            reachabilityProbe: probe ?? reachable.map { StubReachabilityProbe(reachable: $0) },
             sleepDebounceInterval: 0,
             wakeConnectInitialDelay: .milliseconds(5),
             wakeConnectRetryDelay: .milliseconds(5),
-            wakeConnectMaxAttempts: 3
+            wakeConnectMaxAttempts: 3,
+            wakePortWait: wakePortWait
         )
         try controller.saveConfiguration(config)
         return Harness(controller: controller, webOS: webOS, wol: wol, power: power, mediaKeys: mediaKeys, diagnostics: diagnostics)
@@ -282,6 +288,20 @@ struct TVControllerAutomationGuardTests {
         try await Task.sleep(for: .milliseconds(50))
 
         #expect(count(harness.webOS, isPowerOff) == 1)
+    }
+
+    @Test("a wake connects once the TV's control port opens, not before")
+    func wakeWaitsForControlPort() async throws {
+        // Closed before the wake, still closed at the first look afterwards, then open.
+        let probe = ScriptedReachabilityProbe(answers: [false, false, true])
+        let harness = try makeHarness(reachable: nil, config: config(), probe: probe, wakePortWait: .seconds(5))
+
+        await harness.controller.ensureTVAwake(reason: "screenUnlock")
+
+        #expect(probe.callCount == 3)
+        #expect(harness.wol.wakeCalls.count == 1)
+        #expect(harness.webOS.connectCallCount == 1)
+        #expect(harness.controller.connectionState.isConnected)
     }
 
     @Test("a refused pairing stops automatic connects until the user connects")

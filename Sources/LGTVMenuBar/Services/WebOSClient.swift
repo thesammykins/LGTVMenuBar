@@ -84,6 +84,13 @@ final class WebOSClient: WebOSClientProtocol {
     private let endpoints: [WebOSConnectionEndpoint]
     private let timeouts: Timeouts
 
+    /// The endpoint that last completed a handshake with a host. A TV that is still starting up
+    /// fails the endpoint it normally answers on, and working through the others then only
+    /// delays the next attempt, so a proven endpoint is tried alone until it keeps failing.
+    private var provenEndpoint: (host: String, endpoint: WebOSConnectionEndpoint)?
+    private var provenEndpointFailures = 0
+    static let provenEndpointFailureLimit = 3
+
     private var _connectionState = ConnectionState.disconnected
 
     /// Monotonic token used to ignore callbacks from stale socket attempts.
@@ -197,14 +204,18 @@ final class WebOSClient: WebOSClientProtocol {
         let generation = cancelGeneration
 
         var lastError: Error?
+        let host = configuration.ipAddress
+        let proven = provenEndpoint.flatMap { $0.host == host ? $0.endpoint : nil }
 
-        for endpoint in endpoints {
+        for endpoint in proven.map({ [$0] }) ?? endpoints {
             let attemptID = beginConnectionAttempt()
             publishConnectionState(.connecting, attemptID: attemptID)
 
             do {
                 try await connectWithProtocol(ipAddress: configuration.ipAddress, endpoint: endpoint, attemptID: attemptID)
                 log("info", "Connected", ["scheme": endpoint.scheme, "port": "\(endpoint.port)"])
+                provenEndpoint = (host, endpoint)
+                provenEndpointFailures = 0
                 return
             } catch {
                 lastError = error
@@ -224,6 +235,14 @@ final class WebOSClient: WebOSClientProtocol {
                     publishConnectionState(.disconnected)
                     throw lgError
                 }
+            }
+        }
+
+        if proven != nil {
+            provenEndpointFailures += 1
+            if provenEndpointFailures >= Self.provenEndpointFailureLimit {
+                provenEndpoint = nil
+                provenEndpointFailures = 0
             }
         }
 

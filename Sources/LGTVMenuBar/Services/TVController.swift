@@ -271,6 +271,9 @@ public final class TVController: TVControllerProtocol {
     /// Maximum number of reconnect attempts after wake.
     private let wakeConnectMaxAttempts: Int
 
+    /// How long a wake waits for the TV's control port before trying to connect regardless.
+    private let wakePortWait: Duration
+
     /// Maximum time spent polling WebOS after Wake-on-LAN before giving up.
     private let wakeConnectTimeout: Duration
 
@@ -308,7 +311,8 @@ public final class TVController: TVControllerProtocol {
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
         wakeConnectMaxAttempts: Int = 45,
-        wakeConnectTimeout: Duration = .seconds(90)
+        wakeConnectTimeout: Duration = .seconds(90),
+        wakePortWait: Duration = .seconds(12)
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -331,6 +335,7 @@ public final class TVController: TVControllerProtocol {
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
         self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
         self.wakeConnectTimeout = wakeConnectTimeout
+        self.wakePortWait = wakePortWait
         
         setupCallbacks()
         loadConfiguration()
@@ -362,7 +367,8 @@ public final class TVController: TVControllerProtocol {
         wakeConnectInitialDelay: Duration = .seconds(1),
         wakeConnectRetryDelay: Duration = .seconds(2),
         wakeConnectMaxAttempts: Int = 45,
-        wakeConnectTimeout: Duration = .seconds(90)
+        wakeConnectTimeout: Duration = .seconds(90),
+        wakePortWait: Duration = .seconds(12)
     ) {
         self.webOSClient = webOSClient
         self.wolService = wolService
@@ -386,6 +392,7 @@ public final class TVController: TVControllerProtocol {
         self.wakeConnectRetryDelay = wakeConnectRetryDelay
         self.wakeConnectMaxAttempts = max(1, wakeConnectMaxAttempts)
         self.wakeConnectTimeout = wakeConnectTimeout
+        self.wakePortWait = wakePortWait
         
         setupCallbacks()
         loadConfiguration()
@@ -1695,6 +1702,7 @@ public final class TVController: TVControllerProtocol {
             } else {
                 try await Task.sleep(for: wakeConnectRetryDelay)
             }
+            try await waitForControlPort(config, until: deadline)
 
             let elapsedSeconds = durationSecondsString(startedAt.duration(to: clock.now))
             let timeoutSeconds = durationSecondsString(timeout)
@@ -1743,6 +1751,20 @@ public final class TVController: TVControllerProtocol {
         }
 
         throw lastError ?? LGTVError.webosError("Failed to reconnect after wake")
+    }
+
+    /// A TV starting from deep standby takes tens of seconds to open its control port, and a
+    /// connection tried before then spends its whole timeout finding that out. Watching the port
+    /// costs a second at most and lets the connection start the moment the TV can take it.
+    private func waitForControlPort(_ config: TVConfiguration, until deadline: ContinuousClock.Instant) async throws {
+        guard reachabilityProbe != nil else { return }
+        let clock = ContinuousClock()
+        let giveUpAt = min(deadline, clock.now.advanced(by: wakePortWait))
+
+        while clock.now < giveUpAt {
+            if await isTVReachable(config) { return }
+            try await Task.sleep(for: min(.milliseconds(500), clock.now.duration(to: giveUpAt)))
+        }
     }
 
     private func ensureConnectedScreenIsOn(reason: String, config: TVConfiguration) async -> ScreenRecoveryOutcome {
