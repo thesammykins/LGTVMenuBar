@@ -203,6 +203,12 @@ public final class TVController: TVControllerProtocol {
     @ObservationIgnored
     private var isMacAsleep = false
 
+    /// Set when the app turned the TV off because the display slept. A display can light up
+    /// again with nobody there (a lock-screen notification, a dark wake), and turning the TV
+    /// on for each of those would flap it all night, so such a wake waits for real input.
+    @ObservationIgnored
+    private var tvIsOffForDisplaySleep = false
+
     /// Loop guard for every automatic action that changes the TV.
     @ObservationIgnored
     private var governor = ActionGovernor()
@@ -819,6 +825,18 @@ public final class TVController: TVControllerProtocol {
                 ])
                 return wakeRecoveryTask ?? Task {}
             }
+        }
+
+        if tvIsOffForDisplaySleep {
+            guard isSomeoneAtTheMac(trigger: reason) else {
+                logDiagnostic(level: "info", category: "TVController", message: "Wake held - display woke with nobody at the Mac", metadata: [
+                    "reason": reason,
+                    "userIdleSeconds": String(Int(userIdleSeconds?() ?? 0))
+                ])
+                watchForSomeoneReturning()
+                return wakeRecoveryTask ?? Task {}
+            }
+            tvIsOffForDisplaySleep = false
         }
 
         if isWakeRecoveryQueued || isWakeInProgress {
@@ -1631,7 +1649,9 @@ public final class TVController: TVControllerProtocol {
         }
 
         powerManagerMutable.onScreenSleep = { [weak self] in
-            self?.handleDowntimeBegan("displaySlept", lockNotified: false)
+            Task { @MainActor [weak self] in
+                await self?.handleDisplaySleep()
+            }
         }
 
         
@@ -1899,23 +1919,48 @@ public final class TVController: TVControllerProtocol {
             logDiagnostic(level: "info", category: "TVController", message: "Mac sleeping - cancelling TV awake recovery")
         }
 
+        // Asleep counts as nobody using the Mac, so a due refresh may start.
+        if await turnOffTVForIdleMac(reason: "macSleep", mayStartPixelRefresh: true) != nil {
+            dropConnection()
+        }
+    }
+
+    /// The display sleeps on idle even when an app holds the Mac itself awake (an open audio
+    /// stream or a WebRTC call is enough), so it is the signal that nobody is looking.
+    private func handleDisplaySleep() async {
+        guard !isMacAsleep else { return }
+        // A refresh may only start while the Mac is locked, and display sleep alone does not
+        // mean that.
+        let decision = await turnOffTVForIdleMac(reason: "displaySleep", mayStartPixelRefresh: macIsLocked)
+        if decision == .powerOff {
+            tvIsOffForDisplaySleep = true
+        } else {
+            handleDowntimeBegan("displaySlept", lockNotified: false)
+        }
+    }
+
+    /// Turns the TV off if `PowerPolicy` allows it, logging the decision. Returns nil when
+    /// nothing was decided (no configuration, automation off or debounced).
+    private func turnOffTVForIdleMac(reason: String, mayStartPixelRefresh: Bool) async -> PowerPolicy.SleepDecision? {
         guard let config = configuration else {
-            logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - no configuration")
-            return
+            logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - no configuration", metadata: ["reason": reason])
+            return nil
         }
 
         guard config.sleepWithMac else {
-            logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - sleep automation disabled", metadata: tvIdentityMetadata(for: config))
-            return
+            var metadata = tvIdentityMetadata(for: config)
+            metadata["reason"] = reason
+            logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - sleep automation disabled", metadata: metadata)
+            return nil
         }
-        
-        // Debounce: prevent duplicate sleep attempts within 10 seconds
+
+        // Debounce: display sleep and Mac sleep usually arrive together.
         let now = Date()
         let timeSinceLastSleep = now.timeIntervalSince(lastSleepExecution)
         if timeSinceLastSleep < sleepDebounceInterval {
             logger.info("Skipping sleep - debounced (last execution \(String(format: "%.1f", timeSinceLastSleep))s ago)")
-            logDiagnostic(level: "info", category: "TVController", message: "Sleep attempt debounced", metadata: ["timeSinceLastSleep": "\(String(format: "%.1f", timeSinceLastSleep))s"])
-            return
+            logDiagnostic(level: "info", category: "TVController", message: "Sleep attempt debounced", metadata: ["reason": reason, "timeSinceLastSleep": "\(String(format: "%.1f", timeSinceLastSleep))s"])
+            return nil
         }
         lastSleepExecution = now
 
@@ -1926,36 +1971,35 @@ public final class TVController: TVControllerProtocol {
 
         let decision = PowerPolicy.sleepDecision(config: config, isConnected: connectionState.isConnected, foreground: foreground)
         var metadata = tvIdentityMetadata(for: config)
+        metadata["reason"] = reason
         metadata["foreground"] = foreground.diagnosticDescription
         metadata["connectionState"] = "\(connectionState)"
         metadata["decision"] = "\(decision)"
 
         switch decision {
-        case .leaveOn(let reason):
-            logger.info("Skipping TV sleep - \(reason)")
+        case .leaveOn(let why):
+            logger.info("Skipping TV sleep - \(why)")
             metadata["currentInput"] = currentInput?.displayName ?? foreground.diagnosticDescription
             logDiagnostic(level: "info", category: "TVController", message: "Skipping TV sleep - different input", metadata: metadata)
-            dropConnection()
-        case .skip(let reason):
-            logDiagnostic(level: "warning", category: "TVController", message: "TV sleep skipped - \(reason)", metadata: metadata)
-            dropConnection()
+            return decision
+        case .skip(let why):
+            logDiagnostic(level: "warning", category: "TVController", message: "TV sleep skipped - \(why)", metadata: metadata)
+            return decision
         case .powerOff:
-            guard permit(.powerOff, reason: "macSleep") else {
-                dropConnection()
-                return
-            }
-            logger.info("Mac sleeping - turning off TV")
-            logDiagnostic(level: "info", category: "TVController", message: "Mac sleeping - turning off TV", metadata: metadata)
+            guard permit(.powerOff, reason: reason) else { return .skip(reason: "automation suspended") }
+            logger.info("Mac idle - turning off TV")
+            logDiagnostic(level: "info", category: "TVController", message: "Mac idle - turning off TV", metadata: metadata)
             do {
                 try await powerOff()
-                if config.refreshPixelsDuringDowntime, panelCare?.isRefreshDue == true {
-                    beginPixelRefreshWindow(reason: "macSleep")
-                }
             } catch {
                 logger.error("Failed to turn off TV: \(error.localizedDescription)")
-                logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["error": error.localizedDescription])
+                logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["reason": reason, "error": error.localizedDescription])
+                return .skip(reason: "power-off failed")
             }
-            dropConnection()
+            if mayStartPixelRefresh, config.refreshPixelsDuringDowntime, panelCare?.isRefreshDue == true {
+                beginPixelRefreshWindow(reason: reason)
+            }
+            return decision
         }
     }
 

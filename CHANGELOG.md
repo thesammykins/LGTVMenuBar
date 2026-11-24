@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+- The TV is now turned off when the display sleeps, not only when the Mac sleeps. Apps that keep an audio device or a call open (Wave Link, dictation apps, a browser tab with a call in it) stop the Mac from ever sleeping, so the TV was left to its own no-signal timer. The setting is now "Turn the TV off when the display sleeps". If the display lights up again with nobody there, such as for a lock-screen notification, the TV stays off until you touch the keyboard or mouse.
+
 ### Fixed
 - A TV in standby that stays on the network was asked for a connection every minute for as long as it stayed off. It accepts the connection and then drops it, so each try looked like a TV coming back. After three refusals in a row the app now checks every five minutes, as it already does when the TV reports standby. Opening the menu or waking the Mac still connects straight away.
 

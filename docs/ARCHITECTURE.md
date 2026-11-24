@@ -94,12 +94,20 @@ showing a picture returns early, so whatever it is showing stays.
 One recovery runs at a time. Mac sleep cancels it. A user's Disconnect is sticky: background
 reconnects stay off until the user connects or a trigger asks for the TV.
 
-### Sleep (`TVController.handleMacSleep`)
+### Sleep (`TVController.handleDisplaySleep`, `handleMacSleep`)
+
+Display sleep is the main trigger: an app holding an audio stream or a WebRTC call keeps the
+Mac itself awake for days, but the display still sleeps on idle. Mac sleep runs the same path
+as a fallback, debounced against the display sleep that usually comes just before it.
 
 Asks the TV what is in front, then `PowerPolicy.sleepDecision`: power off only when the Mac's
 input is in front (or nothing is known); leave the TV on for any other input or app.
 The screensaver and the Home screen are ignored as foreground values (`TVForeground.systemSurfaceAppIDs`),
 so a TV that fell back to its screensaver when the Mac's display slept is still switched off.
+
+After a display-sleep power-off, a display or system wake with nobody at the Mac (idle past
+`PanelCarePolicy.presenceThreshold`) does not turn the TV on; the app waits for real input.
+A pixel refresh only starts from display sleep if the Mac is also locked.
 
 ### Panel care (`TVController`, `PanelCarePolicy`)
 
@@ -173,9 +181,9 @@ The lock is inactive unless the TV is connected and showing the profile's input.
 
 | Risk | Guard |
 | --- | --- |
-| Wake storms, repeated power off, input flipping | `ActionGovernor`: 6 per kind per 10 min, then 15 min pause, shown in the UI |
+| Wake storms, repeated power off, input flipping | Unattended display wakes held after a display-sleep power-off; `ActionGovernor`: 6 per kind per 10 min, then 15 min pause, shown in the UI |
 | Repeated pairing prompts | `pairingRequiresUser`; one endpoint per refusal |
-| Reconnect hammering | Probe before connect; capped backoff; nothing while the Mac sleeps |
+| Reconnect hammering | Probe before connect; capped backoff; standby pace after three refused connects; nothing while the Mac sleeps |
 | Refresh never completing | Quiet period; unattended wakes held; bounded at 10 min so the TV always comes back |
 | Display Lock fighting macOS or the TV | Settle delay, governor, two-strikes pause |
 | Hung connect blocking all later wakes | Timer-driven timeouts that do not rely on cancellation |

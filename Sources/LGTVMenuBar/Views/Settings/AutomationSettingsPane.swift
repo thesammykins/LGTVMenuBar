@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// What the app does on its own when the Mac sleeps, wakes or the menu is opened.
+/// What the app does on its own when the display sleeps, the Mac wakes or the menu is opened.
 struct AutomationSettingsPane: View {
     let controller: TVController
 
@@ -45,7 +45,7 @@ struct AutomationSettingsPane: View {
             Toggle("Also when opening the menu", isOn: controller.configurationBinding(\.wakeOnMenuOpen, default: true))
                 .disabled(controller.configuration?.wakeWithMac != true)
                 .padding(.leading, 20)
-            Toggle("Turn the TV off when the Mac sleeps", isOn: controller.configurationBinding(\.sleepWithMac, default: true))
+            Toggle("Turn the TV off when the display sleeps", isOn: controller.configurationBinding(\.sleepWithMac, default: true))
         } header: {
             Text("Power")
         } footer: {
