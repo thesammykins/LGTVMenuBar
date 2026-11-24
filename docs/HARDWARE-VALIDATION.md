@@ -39,6 +39,7 @@ first, and export the log if anything misbehaves.
 - macOS posts `com.apple.screenIsLocked` for a manual lock but not when the lock comes from the
   display going to sleep.
 - The TV occasionally leaves one `getVolume` unanswered on a healthy connection.
+- Standby power state (2026-11-23): the power subscription reports `Active Standby` when the TV turns itself off, and the app releases the connection ("TV went into standby - releasing the connection"). With Quick Start+ on, the TV can stay in that state for 40 minutes and more with ports 3000 and 3001 accepting TCP but dropping the WebSocket ("Socket is not connected" on 3001, "The network connection was lost" on 3000).
 - The three SkyLight HDR symbols exist on macOS 27.2, and the two read-only ones report the TV
   correctly.
 
@@ -54,7 +55,7 @@ first, and export the log if anything misbehaves.
 | Pairing refusal | The TV answers a refused prompt with an `error` frame containing 403 or "rejected" | Forget the pairing on the TV, connect, press Decline. The menu should say "Pairing needed" within a second or two. |
 | Pairing prompt | The TV sends a `response` with `pairingType: PROMPT` before `registered` | Same flow; status should read "Accept the prompt on your TV". |
 | System surfaces | The screensaver is `com.webos.app.screensaver` and Home is `com.webos.app.home` | Let the Mac's display sleep until the TV shows its screensaver, then sleep the Mac: the TV should turn off. "TV foreground changed" log lines show the real ids. |
-| Standby power state | A TV that is off but still answering reports `Active Standby` | Turn the TV off with the remote while connected. The app should release the connection ("Reconnected to a TV in standby - releasing"). This TV has Quick Start+ on, so it stays reachable. |
+| Standby pace for a refusing TV | A TV in network standby keeps accepting TCP on 3000/3001 while it drops the WebSocket, and stays that way until woken | Let the TV go into standby with the Mac awake. After three "Reconnect attempt failed" lines the log shows "TV answers but refuses the session - checking at the standby pace", then one attempt every five minutes. |
 | Picture mode read without root | `ssap://settings/getSystemSettings` works on the pairing connection | Display › "Use the TV's Current Mode" with root access off. |
 | Picture mode write | Root: `setSystemSettings`. Without root: the notification-service route | Set a picture mode in Display Lock, change it on the TV, watch it return. |
 | SSH to the TV | Homebrew Channel's SSH server accepts an Ed25519 user key and an algorithm Citadel offers | Advanced › "Create Key and Install on TV", then Test Connection. |

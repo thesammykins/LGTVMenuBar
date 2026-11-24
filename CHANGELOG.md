@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- A TV in standby that stays on the network was asked for a connection every minute for as long as it stayed off. It accepts the connection and then drops it, so each try looked like a TV coming back. After three refusals in a row the app now checks every five minutes, as it already does when the TV reports standby. Opening the menu or waking the Mac still connects straight away.
+
 ## 2.1.2 - 2026-11-12
 
 ### Changed

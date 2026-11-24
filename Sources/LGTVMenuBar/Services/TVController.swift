@@ -255,7 +255,13 @@ public final class TVController: TVControllerProtocol {
     private var reconnectDelayOverride: Duration?
 
     private static let standbyRecheckDelay: Duration = .seconds(300)
-    
+
+    /// A TV in network standby accepts TCP on its control ports but drops the WebSocket, so
+    /// the probe passes and every check becomes a full connect. After this many in a row the
+    /// loop drops to the standby pace; a TV powered on by hand is still found by opening the
+    /// menu or waking the Mac.
+    private static let refusedConnectsBeforeStandbyPace = 3
+
     /// Timestamp of last sleep execution (for debouncing rapid sleep events)
     private var lastSleepExecution: Date = .distantPast
     
@@ -2083,6 +2089,7 @@ public final class TVController: TVControllerProtocol {
 
         reconnectTask = Task { @MainActor [weak self] in
             var attempt = self?.reconnectAttempt ?? 0
+            var refusedInARow = 0
             while true {
                 let delay = self?.reconnectDelayOverride ?? ReconnectSchedule.delay(forAttempt: attempt)
                 self?.reconnectDelayOverride = nil
@@ -2106,6 +2113,7 @@ public final class TVController: TVControllerProtocol {
                 }
 
                 guard await self.isTVReachable(config) else {
+                    refusedInARow = 0
                     if ReconnectSchedule.shouldLog(attempt: attempt) {
                         self.logDiagnostic(level: "debug", category: "TVController", message: "Reconnect check - TV not reachable", metadata: ["attempt": "\(attempt)"])
                     }
@@ -2128,8 +2136,15 @@ public final class TVController: TVControllerProtocol {
                     self.logDiagnostic(level: "info", category: "TVController", message: "Reconnected after connection loss", metadata: ["attempt": "\(attempt)"])
                     break
                 } catch {
-                    self.logDiagnostic(level: "warning", category: "TVController", message: "Reconnect attempt failed", metadata: ["attempt": "\(attempt)", "error": error.localizedDescription])
+                    refusedInARow += 1
+                    self.logDiagnostic(level: "warning", category: "TVController", message: "Reconnect attempt failed", metadata: ["attempt": "\(attempt)", "refusedInARow": "\(refusedInARow)", "error": error.localizedDescription])
                     attempt += 1
+                    if refusedInARow >= Self.refusedConnectsBeforeStandbyPace {
+                        if refusedInARow == Self.refusedConnectsBeforeStandbyPace {
+                            self.logDiagnostic(level: "info", category: "TVController", message: "TV answers but refuses the session - checking at the standby pace", metadata: ["delaySeconds": "\(Self.standbyRecheckDelay.components.seconds)"])
+                        }
+                        self.reconnectDelayOverride = Self.standbyRecheckDelay
+                    }
                 }
             }
             if !Task.isCancelled {
