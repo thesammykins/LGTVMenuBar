@@ -39,26 +39,45 @@ public enum PowerPolicy {
 
     public enum SleepDecision: Equatable, Sendable {
         case powerOff
+        /// Panel dark, TV and its HDMI receiver still on.
+        case screenOff
         case leaveOn(reason: String)
         case skip(reason: String)
     }
 
-    /// The TV is only powered off when the Mac's own input is in front. Anything else means
+    /// What went idle on the Mac's side.
+    public enum Idle: String, Sendable {
+        case macSleep
+        case displaySleep
+    }
+
+    /// The TV is only turned off when the Mac's own input is in front. Anything else means
     /// someone is watching something that has nothing to do with the Mac.
-    public static func sleepDecision(config: TVConfiguration, isConnected: Bool, foreground: TVForeground) -> SleepDecision {
+    ///
+    /// Display sleep only darkens the panel. A fully powered-off TV takes its HDMI receiver down
+    /// with it, and when the display wakes macOS trains the HDMI 2.1 link against a receiver that
+    /// is still asleep; on an M2 Pro that failed training set off a hot-plug storm. Mac sleep
+    /// still powers off, as does the pixel-refresh path, which needs the TV truly off.
+    public static func sleepDecision(
+        config: TVConfiguration,
+        isConnected: Bool,
+        foreground: TVForeground,
+        idle: Idle = .macSleep
+    ) -> SleepDecision {
+        let turnOff: SleepDecision = idle == .displaySleep ? .screenOff : .powerOff
         guard config.sleepWithMac else { return .skip(reason: "sleep automation disabled") }
         guard isConnected else { return .skip(reason: "not connected to the TV") }
 
         switch foreground {
         case .input(let input):
-            if input.rawValue == config.preferredInput { return .powerOff }
+            if input.rawValue == config.preferredInput { return turnOff }
             return .leaveOn(reason: "TV is on \(input.displayName)")
         case .app(let appId):
             return .leaveOn(reason: "TV is showing \(appId)")
         case .unknown:
             // Nothing says the TV is in use for something else, and leaving a display on all
             // night is the worse failure for a Mac monitor.
-            return .powerOff
+            return turnOff
         }
     }
 

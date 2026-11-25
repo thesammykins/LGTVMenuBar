@@ -84,6 +84,10 @@ struct DisplaySettingsPane: View {
             InlineNotice(kind: .success, text: "Everything matches.")
         case .applying(let what):
             InlineNotice(kind: .info, text: "Setting \(what)…")
+        case .settling:
+            InlineNotice(kind: .info, text: "Waiting for the display to settle…")
+        case .displayUnstable:
+            InlineNotice(kind: .warning, text: "The display keeps reconnecting. Display Lock is waiting until it stays connected.")
         case .paused(let message):
             InlineNotice(kind: .warning, text: message)
             Button("Resume") {

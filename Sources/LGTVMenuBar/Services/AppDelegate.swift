@@ -64,6 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.configurationDidChange = { [weak self] _ in
             self?.displayLock.profileDidChange()
         }
+        controller.displayStability = { [weak self] in
+            self?.displayLock.displayStability ?? .stable
+        }
         displayLock.startObservingDisplays()
         
         // Set up popover with custom behavior

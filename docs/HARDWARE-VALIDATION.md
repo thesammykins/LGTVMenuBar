@@ -42,6 +42,14 @@ first, and export the log if anything misbehaves.
 - Standby power state (2026-11-23): the power subscription reports `Active Standby` when the TV turns itself off, and the app releases the connection ("TV went into standby - releasing the connection"). With Quick Start+ on, the TV can stay in that state for 40 minutes and more with ports 3000 and 3001 accepting TCP but dropping the WebSocket ("Socket is not connected" on 3001, "The network connection was lost" on 3000).
 - The three SkyLight HDR symbols exist on macOS 27.2, and the two read-only ones report the TV
   correctly.
+- Screen off and on (2026-11-25): `ssap://com.webos.service.tvpower/power/turnOffScreen` and
+  `turnOnScreen` answer 401 on the pairing connection. The same `luna://` calls with
+  `{standbyMode: active}` work through the root shell. The power state then reads `Screen Off`
+  with the session still connected, and on display wake the app turns the screen on with no
+  reconnect. No DCPEXT1, IRQ_HPD or link messages appeared in the kernel log around that wake.
+- `NSApplication.didChangeScreenParametersNotification` was not posted for a display sleep and
+  wake with the TV's screen off (macOS 27.3), so only the wake notification started Display
+  Lock's 30-second hold.
 
 ## Written from documentation, not yet tried
 
@@ -55,7 +63,11 @@ first, and export the log if anything misbehaves.
 | Pairing refusal | The TV answers a refused prompt with an `error` frame containing 403 or "rejected" | Forget the pairing on the TV, connect, press Decline. The menu should say "Pairing needed" within a second or two. |
 | Pairing prompt | The TV sends a `response` with `pairingType: PROMPT` before `registered` | Same flow; status should read "Accept the prompt on your TV". |
 | System surfaces | The screensaver is `com.webos.app.screensaver` and Home is `com.webos.app.home` | Let the Mac's display sleep until the TV shows its screensaver, then sleep the Mac: the TV should turn off. "TV foreground changed" log lines show the real ids. |
-| Display sleep power-off | `screensDidSleepNotification` arrives while an app holds the Mac awake, and a lock-screen notification wakes the display with a long idle time | Leave the Mac idle with Wave Link running until the display sleeps: the log shows "Mac idle - turning off TV" with reason `displaySleep`. A notification overnight should log "Wake held - display woke with nobody at the Mac", and moving the mouse should bring the TV back. |
+| Display sleep screen-off | `screensDidSleepNotification` arrives while an app holds the Mac awake, and a lock-screen notification wakes the display with a long idle time | Leave the Mac idle with Wave Link running until the display sleeps: the log shows "Display asleep - turning TV screen off". A notification overnight should log "Wake held - display woke with nobody at the Mac", and moving the mouse should bring the screen back. |
+| Screen off without root | The notification-service route makes `luna://com.webos.service.tvpower/power/turnOffScreen` and `turnOnScreen` work | Turn root access off, let the display sleep and wake. The log shows "Screen command not allowed over the pairing connection; using a privileged call" and no "Screen off refused - powering the TV off instead". |
+| Reconfiguration storm | A failing HDMI link posts `didChangeScreenParametersNotification` at least three times, a second or more apart, within a minute | Hard to stage; after a wake where the display drops out, the log shows "Display reconfiguration storm detected; Display Lock holding" and Settings › Display says the display keeps reconnecting. |
+| PC label hold after wake | The post-wake label write waits for `DisplayStability` | Rename HDMI 1 on the TV, sleep the Mac until the TV is off, wake it. The log shows "PC label held - display not settled", then "Setting PC label after wake" about 30 s after the wake. |
+| Pixel refresh after display sleep | With the screen (not the TV) off, the panel-care path still powers the TV off inside the set hours | Between 01:00 and 06:00 with a refresh due, let the display sleep and lock. A minute later the log shows "Downtime decision" with `powerOff`, then "TV switched off for a pixel refresh". |
 | Standby pace for a refusing TV | A TV in network standby keeps accepting TCP on 3000/3001 while it drops the WebSocket, and stays that way until woken | Let the TV go into standby with the Mac awake. After three "Reconnect attempt failed" lines the log shows "TV answers but refuses the session - checking at the standby pace", then one attempt every five minutes. |
 | Picture mode read without root | `ssap://settings/getSystemSettings` works on the pairing connection | Display › "Use the TV's Current Mode" with root access off. |
 | Picture mode write | Root: `setSystemSettings`. Without root: the notification-service route | Set a picture mode in Display Lock, change it on the TV, watch it return. |

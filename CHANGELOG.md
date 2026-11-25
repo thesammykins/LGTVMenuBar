@@ -5,9 +5,12 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 
 ### Changed
-- The TV is now turned off when the display sleeps, not only when the Mac sleeps. Apps that keep an audio device or a call open (Wave Link, dictation apps, a browser tab with a call in it) stop the Mac from ever sleeping, so the TV was left to its own no-signal timer. The setting is now "Turn the TV off when the display sleeps". If the display lights up again with nobody there, such as for a lock-screen notification, the TV stays off until you touch the keyboard or mouse.
+- The TV's screen now goes off when the display sleeps, not only when the Mac sleeps. Apps that keep an audio device or a call open (Wave Link, dictation apps, a browser tab with a call in it) stop the Mac from ever sleeping, so the TV was left to its own no-signal timer. The setting is now "Turn the TV off when the display sleeps". Only the screen goes off: a TV that is fully off has its HDMI input asleep when the Mac wakes, and a Mac driving it at 4K 120 Hz HDR can fail to bring the link up and keep reconnecting the display. The TV still powers fully off when the Mac sleeps and for a pixel refresh inside the set hours. If the display lights up again with nobody there, such as for a lock-screen notification, the screen stays off until you touch the keyboard or mouse.
+- Display Lock waits 30 seconds after the display wakes or reconnects before it changes anything, and the PC input label after a wake waits the same way. If the display reconnects three or more times within a minute, Display Lock says so and waits until it has been steady for a minute, rather than setting 120 Hz HDR on a link that keeps dropping.
+- Display Lock, wake, sleep and panel-care decisions are now kept in the system log, so `log show --predicate 'subsystem == "com.lgtvmenubar"'` can explain what the app did around a display problem.
 
 ### Fixed
+- Screen Off and turning the screen back on did nothing on current LG firmware, which refuses them on the app's normal connection. They now go through the same route as the PC input label: the root shell when it is set up, otherwise the TV's notification service.
 - A TV in standby that stays on the network was asked for a connection every minute for as long as it stayed off. It accepts the connection and then drops it, so each try looked like a TV coming back. After three refusals in a row the app now checks every five minutes, as it already does when the TV reports standby. Opening the menu or waking the Mac still connects straight away.
 
 ## 2.1.2 - 2026-11-12

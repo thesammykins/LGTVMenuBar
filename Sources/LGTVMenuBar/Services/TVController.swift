@@ -36,6 +36,11 @@ public final class TVController: TVControllerProtocol {
     /// Observer for configuration changes (used by Display Lock).
     @ObservationIgnored
     var configurationDidChange: ((TVConfiguration?) -> Void)?
+
+    /// Whether the Mac's displays have settled after a wake or hot-plug (Display Lock tracks it).
+    /// Writing the PC label starts an HDMI handshake on LG TVs, so it waits for this.
+    @ObservationIgnored
+    var displayStability: (@MainActor () -> DisplayStability.State)?
     
     /// TV capabilities (populated after connection)
     public private(set) var capabilities: TVCapabilities?
@@ -203,11 +208,15 @@ public final class TVController: TVControllerProtocol {
     @ObservationIgnored
     private var isMacAsleep = false
 
-    /// Set when the app turned the TV off because the display slept. A display can light up
+    /// Set when the app turned the TV's screen (or, failing that, the TV) off because the display slept. A display can light up
     /// again with nobody there (a lock-screen notification, a dark wake), and turning the TV
     /// on for each of those would flap it all night, so such a wake waits for real input.
     @ObservationIgnored
     private var tvIsOffForDisplaySleep = false
+
+    /// A PC-label write after a wake, waiting for the displays to settle.
+    @ObservationIgnored
+    private var postWakePCLabelTask: Task<Void, Never>?
 
     /// Loop guard for every automatic action that changes the TV.
     @ObservationIgnored
@@ -867,12 +876,24 @@ public final class TVController: TVControllerProtocol {
     
     /// Turn off the TV screen (display only, TV stays on)
     public func screenOff() async throws {
-        try await webOSClient.sendCommand(.screenOff)
+        try await sendScreenCommand(.screenOff, luna: "luna://com.webos.service.tvpower/power/turnOffScreen")
     }
     
     /// Turn on the TV screen
     public func screenOn() async throws {
-        try await webOSClient.sendCommand(.screenOn)
+        try await sendScreenCommand(.screenOn, luna: "luna://com.webos.service.tvpower/power/turnOnScreen")
+    }
+
+    /// Current firmware (an LG C2 on webOS 22) answers the screen commands with "401
+    /// insufficient permissions" on the pairing connection; the same Luna call made as a
+    /// privileged call works. Other refusals (a screen already on) are passed on as they are.
+    private func sendScreenCommand(_ command: WebOSCommand, luna: String) async throws {
+        do {
+            try await webOSClient.sendCommand(command)
+        } catch LGTVError.commandFailed(let message) where message.contains("401") {
+            logDiagnostic(level: "info", category: "TVController", message: "Screen command not allowed over the pairing connection; using a privileged call", metadata: ["uri": luna])
+            try await privilegedCalls.invokePrivileged(luna, parameters: ["standbyMode": "active"])
+        }
     }
     
     // MARK: - Volume Control
@@ -1893,13 +1914,43 @@ public final class TVController: TVControllerProtocol {
             }
         }
 
-        if actions.setPCMode, permit(.tvSettingWrite, reason: reason) {
+        if actions.setPCMode {
+            schedulePostWakePCLabel(input: input, reason: reason)
+        }
+    }
+
+    /// Writes the PC label once the displays have settled. The write makes an LG TV renegotiate
+    /// HDMI, which right after a wake lands on a link that may still be training. Runs apart
+    /// from the wake so the wake itself is not held open.
+    private func schedulePostWakePCLabel(input: TVInputType, reason: String) {
+        postWakePCLabelTask?.cancel()
+        postWakePCLabelTask = Task { @MainActor [weak self] in
+            // Bounded: give up after about two minutes of a display that will not settle.
+            var checks = 0
+            while let state = self?.displayStability?(), !state.isStable {
+                if checks == 0 {
+                    self?.logDiagnostic(level: "info", category: "TVController", message: "PC label held - display not settled", metadata: ["reason": reason, "state": "\(state)"])
+                }
+                checks += 1
+                guard checks < 40 else {
+                    self?.logDiagnostic(level: "warning", category: "TVController", message: "PC label skipped - display did not settle", metadata: ["reason": reason])
+                    return
+                }
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    return
+                }
+            }
+            guard let self, !self.isMacAsleep, self.connectionState.isConnected else { return }
+            // Something may have set it while waiting.
+            if await self.isPCMode(inputID: input.rawValue) ?? true { return }
+            guard self.permit(.tvSettingWrite, reason: reason) else { return }
             do {
-                logger.info("Setting PC mode for \(config.preferredInput)")
-                try await setPCMode(for: input, enabled: true)
+                self.logDiagnostic(level: "info", category: "TVController", message: "Setting PC label after wake", metadata: ["reason": reason, "input": input.rawValue])
+                try await self.setPCMode(for: input, enabled: true)
             } catch {
-                logger.warning("Failed to set PC mode after wake: \(error.localizedDescription)")
-                logDiagnostic(level: "warning", category: "TVController", message: "Failed to set PC mode after wake", metadata: ["error": error.localizedDescription, "preferredInput": config.preferredInput])
+                self.logDiagnostic(level: "warning", category: "TVController", message: "Failed to set PC mode after wake", metadata: ["error": error.localizedDescription, "preferredInput": input.rawValue])
             }
         }
     }
@@ -1913,6 +1964,8 @@ public final class TVController: TVControllerProtocol {
         downtimeTask = nil
         presenceWatchTask?.cancel()
         presenceWatchTask = nil
+        postWakePCLabelTask?.cancel()
+        postWakePCLabelTask = nil
 
         if isWakeInProgress || isWakeRecoveryQueued {
             wakeRecoveryTask?.cancel()
@@ -1920,28 +1973,34 @@ public final class TVController: TVControllerProtocol {
         }
 
         // Asleep counts as nobody using the Mac, so a due refresh may start.
-        if await turnOffTVForIdleMac(reason: "macSleep", mayStartPixelRefresh: true) != nil {
+        if await turnOffTVForIdleMac(.macSleep) != nil {
             dropConnection()
         }
     }
 
     /// The display sleeps on idle even when an app holds the Mac itself awake (an open audio
     /// stream or a WebRTC call is enough), so it is the signal that nobody is looking.
+    ///
+    /// Only the screen goes off, so the TV's HDMI receiver is awake when the display wakes. A
+    /// pixel refresh that needs the TV truly off goes through the panel-care path, which only
+    /// powers off while the Mac is locked and inside the set hours.
     private func handleDisplaySleep() async {
         guard !isMacAsleep else { return }
-        // A refresh may only start while the Mac is locked, and display sleep alone does not
-        // mean that.
-        let decision = await turnOffTVForIdleMac(reason: "displaySleep", mayStartPixelRefresh: macIsLocked)
-        if decision == .powerOff {
+        postWakePCLabelTask?.cancel()
+        postWakePCLabelTask = nil
+        switch await turnOffTVForIdleMac(.displaySleep) {
+        case .screenOff, .powerOff:
             tvIsOffForDisplaySleep = true
-        } else {
-            handleDowntimeBegan("displaySlept", lockNotified: false)
+        case .leaveOn, .skip, nil:
+            break
         }
+        handleDowntimeBegan("displaySlept", lockNotified: false)
     }
 
-    /// Turns the TV off if `PowerPolicy` allows it, logging the decision. Returns nil when
-    /// nothing was decided (no configuration, automation off or debounced).
-    private func turnOffTVForIdleMac(reason: String, mayStartPixelRefresh: Bool) async -> PowerPolicy.SleepDecision? {
+    /// Turns the TV (or its screen) off if `PowerPolicy` allows it, logging the decision.
+    /// Returns nil when nothing was decided (no configuration, automation off or debounced).
+    private func turnOffTVForIdleMac(_ idle: PowerPolicy.Idle) async -> PowerPolicy.SleepDecision? {
+        let reason = idle.rawValue
         guard let config = configuration else {
             logDiagnostic(level: "info", category: "TVController", message: "TV sleep skipped - no configuration", metadata: ["reason": reason])
             return nil
@@ -1969,7 +2028,7 @@ public final class TVController: TVControllerProtocol {
             try? await webOSClient.sendCommand(.getCurrentForegroundAppInfo)
         }
 
-        let decision = PowerPolicy.sleepDecision(config: config, isConnected: connectionState.isConnected, foreground: foreground)
+        let decision = PowerPolicy.sleepDecision(config: config, isConnected: connectionState.isConnected, foreground: foreground, idle: idle)
         var metadata = tvIdentityMetadata(for: config)
         metadata["reason"] = reason
         metadata["foreground"] = foreground.diagnosticDescription
@@ -1996,10 +2055,29 @@ public final class TVController: TVControllerProtocol {
                 logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["reason": reason, "error": error.localizedDescription])
                 return .skip(reason: "power-off failed")
             }
-            if mayStartPixelRefresh, config.refreshPixelsDuringDowntime, panelCare?.isRefreshDue == true {
+            // Asleep counts as nobody using the Mac, so a due refresh may start.
+            if idle == .macSleep, config.refreshPixelsDuringDowntime, panelCare?.isRefreshDue == true {
                 beginPixelRefreshWindow(reason: reason)
             }
             return decision
+        case .screenOff:
+            guard permit(.powerOff, reason: reason) else { return .skip(reason: "automation suspended") }
+            logDiagnostic(level: "info", category: "TVController", message: "Display asleep - turning TV screen off", metadata: metadata)
+            do {
+                try await screenOff()
+                return decision
+            } catch {
+                // A TV that refuses screen off would otherwise sit on no signal until its own
+                // timer powers it off, which is the same cold wake this avoids.
+                logDiagnostic(level: "warning", category: "TVController", message: "Screen off refused - powering the TV off instead", metadata: metadata.merging(["error": error.localizedDescription]) { _, new in new })
+                do {
+                    try await powerOff()
+                    return .powerOff
+                } catch {
+                    logDiagnostic(level: "error", category: "TVController", message: "Failed to turn off TV", metadata: ["reason": reason, "error": error.localizedDescription])
+                    return .skip(reason: "power-off failed")
+                }
+            }
         }
     }
 
@@ -2276,9 +2354,24 @@ public final class TVController: TVControllerProtocol {
     
     // MARK: - Diagnostic Logging
     
+    /// Decisions (categories in `persistedCategories`) also go to the unified log at notice or
+    /// above, which macOS keeps on disk, so a problem on real hardware can be explained after the
+    /// fact without the diagnostic capture having been on. Other categories can carry TV payloads
+    /// or root-shell output and stay in the in-app capture only.
     private func logDiagnostic(level: String, category: String, message: String, metadata: [String: String]? = nil) {
         diagnosticLogger.log(level: level, category: category, message: message, metadata: metadata)
+        guard Self.persistedCategories.contains(category), level != "debug" else { return }
+        let details = (metadata ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        let line = details.isEmpty ? message : "\(message) \(details)"
+        switch level {
+        case "error": decisionLogger.error("[\(category, privacy: .public)] \(line, privacy: .public)")
+        case "warning": decisionLogger.warning("[\(category, privacy: .public)] \(line, privacy: .public)")
+        default: decisionLogger.notice("[\(category, privacy: .public)] \(line, privacy: .public)")
+        }
     }
+
+    private static let persistedCategories: Set<String> = ["TVController", "PanelCare"]
+    private let decisionLogger = Logger(subsystem: "com.lgtvmenubar", category: "Decisions")
 
     private var isWebOSConnectionReady: Bool {
         connectionState.isConnected && webOSClient.connectionState.isConnected

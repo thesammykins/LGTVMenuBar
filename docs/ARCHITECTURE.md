@@ -100,14 +100,20 @@ Display sleep is the main trigger: an app holding an audio stream or a WebRTC ca
 Mac itself awake for days, but the display still sleeps on idle. Mac sleep runs the same path
 as a fallback, debounced against the display sleep that usually comes just before it.
 
-Asks the TV what is in front, then `PowerPolicy.sleepDecision`: power off only when the Mac's
+Asks the TV what is in front, then `PowerPolicy.sleepDecision`: turn off only when the Mac's
 input is in front (or nothing is known); leave the TV on for any other input or app.
+Display sleep turns off only the screen (`screenOff`); Mac sleep powers the TV off. A powered-off
+TV takes its HDMI receiver down, and on display wake macOS trains the HDMI 2.1 link against a
+receiver that is still asleep; at 4K 120 Hz HDR on an M2 Pro that failed and set off a hot-plug
+storm. A TV that refuses screen off is powered off instead. Waking from screen off is the
+existing "screen off -> screen on" branch of wake recovery.
 The screensaver and the Home screen are ignored as foreground values (`TVForeground.systemSurfaceAppIDs`),
 so a TV that fell back to its screensaver when the Mac's display slept is still switched off.
 
-After a display-sleep power-off, a display or system wake with nobody at the Mac (idle past
+After a display-sleep screen-off, a display or system wake with nobody at the Mac (idle past
 `PanelCarePolicy.presenceThreshold`) does not turn the TV on; the app waits for real input.
-A pixel refresh only starts from display sleep if the Mac is also locked.
+A pixel refresh that needs the TV truly off goes through the panel-care path below after display
+sleep, so it only happens while the Mac is locked and inside the set hours.
 
 ### Panel care (`TVController`, `PanelCarePolicy`)
 
@@ -154,7 +160,9 @@ says whether a refresh actually ran.
 ### Privileged calls (`TVPrivilegedCalls.invokePrivileged`)
 
 Some services answer "401 insufficient permissions" on the pairing connection: writing settings,
-and on current firmware `com.webos.service.eim/setDeviceInfo` (the PC input label). Those go
+on current firmware `com.webos.service.eim/setDeviceInfo` (the PC input label), and
+`com.webos.service.tvpower/power/turnOffScreen` and `turnOnScreen`. The screen commands are tried
+on the pairing connection first and only go privileged on a 401. Those go
 through the root shell when it is usable, otherwise through the TV's notification service
 (create an alert whose close action is the Luna call, then close it).
 
@@ -168,7 +176,19 @@ change noted -> settle delay (3 s, restarts on further changes)
        compliant  -> done
        same drift -> count a failure; twice for one correction -> paused(reason)
 paused -> resume() by the user, or the profile is edited
+
+before evaluating: DisplayStability not stable (lock enabled)?
+  settling (30 s since the last wake or reconfiguration)  -> status settling, run again after
+  storm (3+ reconfigurations a second or more apart within 60 s) -> status displayUnstable,
+      run again once there has been none for 60 s
 ```
+
+Writing a mode, HDR or the PC label starts another HDMI handshake, so nothing is applied while
+the link may still be training. Display and Mac wakes (`NSWorkspace`) and reconfigurations feed
+`DisplayStability`; reconfigurations that arrive during the lock's own correction cycle are its
+own doing and are not counted. The post-wake PC label write (`TVController`) waits on the same
+state through `displayStability`, for at most two minutes, and checks the label again before
+writing.
 
 Changes come from the TV's foreground, the connection, the profile, and
 `NSApplication.didChangeScreenParametersNotification`. Applying a correction produces those same
@@ -186,6 +206,7 @@ The lock is inactive unless the TV is connected and showing the profile's input.
 | Reconnect hammering | Probe before connect; capped backoff; standby pace after three refused connects; nothing while the Mac sleeps |
 | Refresh never completing | Quiet period; unattended wakes held; bounded at 10 min so the TV always comes back |
 | Display Lock fighting macOS or the TV | Settle delay, governor, two-strikes pause |
+| Writes into an HDMI link that is still training | `DisplayStability`: 30 s hold after a wake or reconfiguration; storm hold; display sleep uses screen off |
 | Hung connect blocking all later wakes | Timer-driven timeouts that do not rely on cancellation |
 
 ## Root access
@@ -211,5 +232,8 @@ SSH private key and any shell password are Keychain items.
 
 `DiagnosticLogger` is an in-memory ring exported as JSON from Settings › Advanced. Components log
 through `TVController.logDiagnostic` with a category (`TVController`, `WebOSClient`,
-`RootAccess`, `PrivilegedCalls`, `PanelCare`, `DisplayLock`, `Settings`). The same events go to the unified
-log under subsystem `com.lgtvmenubar`.
+`RootAccess`, `PrivilegedCalls`, `PanelCare`, `DisplayLock`, `Settings`). The decision
+categories (`TVController`, `PanelCare`, and Display Lock's own logger) also go to the unified log
+under subsystem `com.lgtvmenubar` at notice or above with public metadata, so macOS keeps them on
+disk and `log show --predicate 'subsystem == "com.lgtvmenubar"'` explains an incident after the
+fact. The other categories can carry TV payloads or shell output and stay in the in-app ring.

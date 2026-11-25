@@ -27,6 +27,10 @@ extension TVController: DisplayLockTVInterface {}
 /// things keep it from looping: changes coalesce behind the settle delay, every write draws on
 /// the shared `ActionGovernor` budget, and a correction that does not stick twice pauses the lock
 /// until the user resumes it.
+///
+/// Nothing is applied while the displays are settling after a wake or hot-plug
+/// (`DisplayStability`): re-applying 120 Hz HDR into an HDMI link that is still training starts
+/// another handshake. Reconfigurations caused by the lock's own corrections are not counted.
 @MainActor
 @Observable
 public final class DisplayLockController {
@@ -37,6 +41,10 @@ public final class DisplayLockController {
         case compliant
         case applying(String)
         case paused(String)
+        /// Holding off until the displays have been quiet since a wake or reconfiguration.
+        case settling
+        /// The displays keep reconfiguring; holding off until they have been quiet for a minute.
+        case displayUnstable
     }
 
     public private(set) var status: Status = .off
@@ -56,6 +64,8 @@ public final class DisplayLockController {
     @ObservationIgnored private var failures: [DisplayLockCorrection: Int] = [:]
     @ObservationIgnored private var lastProfile: DisplayLockProfile?
     @ObservationIgnored private var screenObserver: NSObjectProtocol?
+    @ObservationIgnored private var wakeObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var stability = DisplayStability()
 
     /// Receives (level, message, metadata) for every decision.
     @ObservationIgnored public var log: (String, String, [String: String]) -> Void = { _, _, _ in }
@@ -85,7 +95,11 @@ public final class DisplayLockController {
         return DisplayLockEvaluator.resolveDisplay(profile: profile, displays: displayService.displays())
     }
 
-    /// Starts watching macOS display reconfiguration. TV-side changes are fed in by the owner.
+    /// Whether the displays are settling after a wake or reconfiguration. Other writes that can
+    /// start an HDMI handshake (the PC label after a wake) wait on this too.
+    public var displayStability: DisplayStability.State { stability.state(at: Date()) }
+
+    /// Starts watching macOS display reconfiguration and wakes. TV-side changes are fed in by the owner.
     public func startObservingDisplays() {
         guard screenObserver == nil else { return }
         screenObserver = NotificationCenter.default.addObserver(
@@ -94,10 +108,38 @@ public final class DisplayLockController {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.noteChange("displayReconfigured")
+                self?.displayReconfigured()
             }
         }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for (name, reason) in [(NSWorkspace.screensDidWakeNotification, "displayWoke"), (NSWorkspace.didWakeNotification, "macWoke")] {
+            wakeObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.displayWoke(reason)
+                }
+            })
+        }
         noteChange("started")
+    }
+
+    private func displayWoke(_ reason: String) {
+        stability.noteWake(at: Date())
+        record("info", "Display woke; holding display writes", ["trigger": reason, "seconds": "\(Int(DisplayStability.settleInterval))"])
+        noteChange(reason)
+    }
+
+    private func displayReconfigured() {
+        // The lock's own corrections reconfigure the display; those are expected, not instability.
+        if !isRunningCycle {
+            let wasStorm = stability.state(at: Date()).isStorm
+            stability.noteReconfiguration(at: Date())
+            let state = stability.state(at: Date())
+            record("info", "Display reconfigured", ["state": describe(state), "displays": "\(displayService.displays().count)"])
+            if !wasStorm, case .storm(let count, _) = state {
+                record("error", "Display reconfiguration storm detected; Display Lock holding", ["reconfigurations": "\(count)", "withinSeconds": "\(Int(DisplayStability.stormWindow))"])
+            }
+        }
+        noteChange("displayReconfigured")
     }
 
     /// The profile was edited. A new profile gets a clean slate.
@@ -119,15 +161,18 @@ public final class DisplayLockController {
             changeArrivedDuringCycle = true
             return
         }
+        scheduleCycle(reason: reason, after: settleDelay)
+    }
+
+    private func scheduleCycle(reason: String, after delay: Duration) {
         pendingCycle?.cancel()
         pendingCycle = Task { @MainActor [weak self] in
-            guard let self else { return }
             do {
-                try await Task.sleep(for: self.settleDelay)
+                try await Task.sleep(for: delay)
             } catch {
                 return
             }
-            await self.runCycle(reason: reason)
+            await self?.runCycle(reason: reason)
         }
     }
 
@@ -166,6 +211,14 @@ public final class DisplayLockController {
         }
 
         if case .paused = status { return }
+
+        let stabilityState = stability.state(at: Date())
+        if tv?.configuration?.displayLock.isEnabled == true, let until = stabilityState.until {
+            setStatus(stabilityState.isStorm ? .displayUnstable : .settling, reason: reason)
+            record("info", "Display Lock held - display not settled", ["state": describe(stabilityState), "trigger": reason])
+            scheduleCycle(reason: "displaySettled", after: .seconds(max(until.timeIntervalSinceNow, 0) + 0.5))
+            return
+        }
 
         let evaluation = await evaluate()
         switch evaluation {
@@ -299,8 +352,23 @@ public final class DisplayLockController {
         status = newStatus
     }
 
+    private func describe(_ state: DisplayStability.State) -> String {
+        switch state {
+        case .stable: return "stable"
+        case .settling(let until): return "settling for \(Int(until.timeIntervalSinceNow.rounded(.up)))s"
+        case .storm(let count, let until): return "storm (\(count) reconfigurations), holding \(Int(until.timeIntervalSinceNow.rounded(.up)))s"
+        }
+    }
+
+    /// Written at notice or above so macOS keeps it on disk: these are what explain a display
+    /// incident after the fact (`log show --predicate 'subsystem == "com.lgtvmenubar"'`).
     private func record(_ level: String, _ message: String, _ metadata: [String: String]) {
-        logger.info("\(message, privacy: .public) \(metadata, privacy: .public)")
+        let line = "\(message) \(metadata.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))"
+        switch level {
+        case "error": logger.error("\(line, privacy: .public)")
+        case "warning": logger.warning("\(line, privacy: .public)")
+        default: logger.notice("\(line, privacy: .public)")
+        }
         log(level, message, metadata)
     }
 }
